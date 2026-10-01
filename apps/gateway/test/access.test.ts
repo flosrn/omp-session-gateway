@@ -476,14 +476,24 @@ describe("Cloudflare Access HTTP admission", () => {
     expect(output).not.toContain("JWT");
   });
 
-  test("readiness proofs are refused to requests that arrived through the tunnel", async () => {
-    const { verifier } = fixture([keyA]);
+  test("a tunneled health probe needs Access admission and never receives a readiness proof", async () => {
+    const { state, verifier } = fixture([keyA]);
     const handler = handlerFor(verifier);
     expect((await handler(new Request("http://127.0.0.1:4317/api/v1/health"), peer)).status).toBe(200);
     for (const header of ["Cf-Ray", "Cf-Connecting-Ip", "Cf-Access-Jwt-Assertion", "X-Forwarded-For"]) {
       const response = await handler(new Request(`${ORIGIN}/api/v1/health`, { headers: { [header]: "x" } }), peer);
-      expect(response.status).toBe(403);
+      expect(response.status).toBe(401);
     }
+    const assertion = await token(keyA, state.nowMs);
+    const admitted = await handler(request("/api/v1/health", assertion), peer);
+    expect(admitted.status).toBe(200);
+    expect(await admitted.json()).toEqual({ status: "ready" });
+    const challenged = await handler(
+      request("/api/v1/health", assertion, { headers: { "X-OMP-Readiness-Challenge": "a".repeat(43) } }),
+      peer,
+    );
+    expect(challenged.status).toBe(403);
+    expect(await challenged.text()).not.toContain("proof");
   });
 });
 

@@ -344,23 +344,23 @@ export function createHttpHandler(options: {
       return problem(400, "bad_request", "Query parameters are not accepted");
     }
 
+    const healthRoute = url.pathname === "/api/v1/health" && request.method === "GET";
+    // Behind a tunnel every public request is a loopback peer too, and the tunnel inserts these
+    // headers itself, so their presence marks a request that came from outside this host.
+    const tunneled =
+      config.auth.mode === "cloudflare-access" &&
+      ["Cf-Ray", "Cf-Connecting-Ip", "Cf-Access-Jwt-Assertion", "Cf-Visitor", "X-Forwarded-For"].some(
+        header => request.headers.get(header) !== null,
+      );
+    const healthStatus = (): "ready" | "degraded" => (options.endpointHealthy?.() === false ? "degraded" : "ready");
 
-    if (url.pathname === "/api/v1/health" && request.method === "GET") {
+    // The local readiness path. A tunneled health request is the signed-in browser's liveness probe
+    // and is answered below, after Access admission.
+    if (healthRoute && !tunneled) {
       if (peer === undefined || !isLoopbackAddress(peer.address)) {
         return problem(403, "forbidden", "Forbidden");
       }
-      // Behind a tunnel every public request is a loopback peer too. Readiness proofs are for the
-      // local CLI only, and a tunnel inserts these headers itself, so their presence marks a request
-      // that came from outside this host.
-      if (
-        config.auth.mode === "cloudflare-access" &&
-        ["Cf-Ray", "Cf-Connecting-Ip", "Cf-Access-Jwt-Assertion", "Cf-Visitor", "X-Forwarded-For"].some(
-          header => request.headers.get(header) !== null,
-        )
-      ) {
-        return problem(403, "forbidden", "Forbidden");
-      }
-      const status = options.endpointHealthy?.() === false ? "degraded" : "ready";
+      const status = healthStatus();
       const challenge = request.headers.get("X-OMP-Readiness-Challenge");
       if (challenge === null) return withSecurityHeaders(Response.json({ status }), true);
       if (options.readinessToken === undefined || !/^[A-Za-z0-9_-]{43}$/u.test(challenge)) {
@@ -399,6 +399,14 @@ export function createHttpHandler(options: {
         keys_unavailable: authorization.reason === "keys_unavailable",
       });
       return authenticationRefusal(config.auth.mode, authorization.reason, peer);
+    }
+    if (healthRoute) {
+      // The collab client probes this route to judge the Gateway path while a session is open; a
+      // refusal here reads as "Gateway unavailable" for as long as the session stays open. An
+      // admitted browser gets the bare status. Readiness proofs stay local: they authenticate the
+      // daemon to the CLI, and a tunnel has no business minting them.
+      if (request.headers.get("X-OMP-Readiness-Challenge") !== null) return problem(403, "forbidden", "Forbidden");
+      return withSecurityHeaders(Response.json({ status: healthStatus() }), true);
     }
     if (url.pathname === "/api/v1/sessions" && request.method === "GET") {
       return withSecurityHeaders(Response.json(registry.snapshot()), true);
