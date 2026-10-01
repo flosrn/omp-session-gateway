@@ -29,7 +29,8 @@ import {
   resolveRollbackTarget,
   stageRuntimePayload,
 } from "./installation.ts";
-import { OmpHostReader, OmpLaunchResolver, startHostPoller } from "./omp-registry.ts";
+import { OmpHostReader, OmpLaunchResolver, startHostPoller, type HostPoller } from "./omp-registry.ts";
+import { startFleetFederation, type FleetFederation } from "./federation.ts";
 import { SafeLogger } from "./logger.ts";
 import { PushService } from "./push.ts";
 import { SessionRegistry } from "./registry.ts";
@@ -183,20 +184,18 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
     maxSessions: config.registry.maxSessions,
     onListenerError: () => logger.event("warn", "registry.listener_failed"),
   });
-  const reader = new OmpHostReader({
+  const reader = config.federation === undefined ? new OmpHostReader({
     directory: config.omp.discoveryDir,
     maxEntries: config.registry.maxSessions,
     timeoutMs: config.omp.queryTimeoutMs,
     onFault: (event, detail) => logger.event("warn", event, detail),
-  });
-  const launchResolver = new OmpLaunchResolver({ registry, reader });
+  }) : undefined;
+  // Push init can fail after creating state. A fleet timer started before that failure sits
+  // outside the shutdown below, and its interval keeps the process alive. Start the fleet only
+  // once push is open, beside the local poller, so this same stop path covers both.
   const pushService = await PushService.open({ config, registry, logger });
-  const poller = startHostPoller({
-    reader,
-    registry,
-    intervalMs: config.registry.heartbeatSeconds * 1_000,
-    onEvent: (event, detail) => logger.event("info", event, detail),
-  });
+  let fleet: FleetFederation | undefined;
+  let poller: HostPoller | undefined;
   let stopping = false;
   let resolveStop: () => void = () => undefined;
   const stopped = new Promise<void>(resolve => {
@@ -212,6 +211,18 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   try {
+    fleet = config.federation === undefined ? undefined : startFleetFederation({
+      federation: config.federation,
+      registry,
+      onEvent: (event, detail) => logger.event("info", event, detail),
+    });
+    const launchResolver = fleet ?? new OmpLaunchResolver({ registry, reader: reader! });
+    poller = reader === undefined ? undefined : startHostPoller({
+      reader,
+      registry,
+      intervalMs: config.registry.heartbeatSeconds * 1_000,
+      onEvent: (event, detail) => logger.event("info", event, detail),
+    });
     http = startHttpServer({
       config,
       registry,
@@ -221,7 +232,7 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
       pushService,
       readinessToken: token,
       ...(readinessInstance === undefined ? {} : { readinessInstance }),
-      endpointHealthy: () => poller.discoveryHealthy,
+      endpointHealthy: () => fleet?.healthy ?? poller?.discoveryHealthy ?? false,
     });
     // The poller refreshes liveness for hosts that answer; the sweeper retires the ones that stay
     // unreadable past the TTL, so a host whose socket hangs cannot linger in the directory forever.
@@ -234,7 +245,8 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
     clearInterval(sweeper);
-    poller.stop();
+    fleet?.stop();
+    poller?.stop();
     try {
       http?.stop(true);
     } finally {
@@ -335,6 +347,10 @@ async function runInstall(arguments_: ParsedArguments): Promise<void> {
       publicOrigin: origin,
       allowedLogins,
       ...(port === undefined ? {} : { port }),
+      // Install has no Access flags. Omitting mode rewrites a cloudflare-access host as
+      // tailscale-serve and drops the team domain and audience. Carry the prior mode so a manual
+      // reinstall keeps those settings; an explicit tailscale write still leaves Access mode.
+      ...(priorConfig?.auth.mode === "cloudflare-access" ? { mode: "cloudflare-access" as const } : {}),
     });
     const webRoot = resolve(fileURLToPath(new URL("../../web/dist/", import.meta.url)));
     await StaticAssetStore.load(webRoot);

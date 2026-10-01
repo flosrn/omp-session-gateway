@@ -420,12 +420,16 @@ export class PushService {
     const { instanceId, generation } = event.session;
     this.#queueDelivery(instanceId, async () => {
       // A later ask, resume, unreadable poll, or replacement invalidates this edge even if the
-      // session has already returned to the same stopped metadata while delivery was queued.
+      // session has already returned to the same stopped metadata while delivery was queued. The
+      // probe uses whichever access the card offers (a fleet card is Control-only); an unavailable
+      // fleet card authorizes nothing, so a stale machine never raises a stop.
       const pendingAskCount = this.#pendingAskCount();
-      const current = this.#registry.authorizeLaunch(instanceId, generation, "view");
+      const current = this.#registry.authorizeLaunch(instanceId, generation, event.session.canView ? "view" : "control");
       if (current.status !== "ok") return;
       const { session } = current;
-      if (!session.canView || session.busy !== false || session.inputRequired || session.ask !== undefined) return;
+      if (session.available === false || session.busy !== false || session.inputRequired || session.ask !== undefined) {
+        return;
+      }
       if (!this.#registry.isCurrentActivityStop(event)) return;
       await this.#deliver(instanceId, subscription => {
         const body = sessionNotificationBody(session, subscription.detailLevel === "private" ? "private" : "session");

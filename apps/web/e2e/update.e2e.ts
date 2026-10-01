@@ -131,14 +131,20 @@ test("an updated PWA activates and reloads an idle directory automatically", { t
 });
 
 test("an updated PWA preserves active collaboration until the user leaves", async ({ page }) => {
-  const fixture = await startDashboardFixture([session()]);
+  // A pending ask offers a Transcript view whose shell can still upgrade to Control.
+  const asking: SessionMetadata = {
+    ...session(),
+    inputRequired: true,
+    ask: { requestId: "pwa-upgrade-request-0001", since: "2026-07-25T05:00:01.000Z" },
+  };
+  const fixture = await startDashboardFixture([asking]);
   await installLoadCounter(page);
   await installSilentWebSocket(page);
 
   try {
     await page.goto(fixture.origin);
     await waitForControlledWorker(page);
-    await page.getByRole("button", { name: "View Automatic PWA upgrade" }).click();
+    await page.locator(".queue-hero").getByRole("button", { name: "Transcript" }).click();
     await expect(page).toHaveURL(`${fixture.origin}/client/`);
     expect(await loadCount(page)).toBe(1);
 
@@ -166,7 +172,7 @@ test("an updated PWA preserves active collaboration until the user leaves", asyn
     await page.goBack();
     await expect(page).toHaveURL(`${fixture.origin}/`);
     await expect.poll(() => loadCount(page)).toBe(2);
-    await expect(page.locator(".working-row")).toHaveCount(1);
+    await expect(page.locator(".queue-hero")).toHaveCount(1);
   } finally {
     await fixture.stop();
   }
@@ -174,8 +180,9 @@ test("an updated PWA preserves active collaboration until the user leaves", asyn
 
 for (const order of ["the failure settles first", "a collaboration mounts first"] as const) {
   test(`an updated PWA never interrupts concurrent launches when ${order}`, async ({ page }) => {
-    const failing = session("pwa-upgrade-0002", "Failing launch");
-    const fixture = await startDashboardFixture([session(), failing]);
+    // View-only sessions keep View as their one-tap action.
+    const failing = { ...session("pwa-upgrade-0002", "Failing launch"), canControl: false };
+    const fixture = await startDashboardFixture([{ ...session(), canControl: false }, failing]);
     await installLoadCounter(page);
     await installSilentWebSocket(page);
     const failingLaunch = await holdRoute(page, `**/api/v1/sessions/${failing.instanceId}/launch`, route =>

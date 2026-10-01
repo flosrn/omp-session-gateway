@@ -101,12 +101,85 @@
                 "maximum": 128
               }
             }
+          },
+          "host": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+          },
+          "originalInstanceId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+          },
+          "hostStatus": {
+            "enum": ["live", "stale", "never"]
+          },
+          "available": {
+            "type": "boolean"
           }
+        },
+        "dependentRequired": {
+          "host": ["originalInstanceId", "hostStatus", "available"],
+          "originalInstanceId": ["host", "hostStatus", "available"],
+          "hostStatus": ["host", "originalInstanceId", "available"],
+          "available": ["host", "originalInstanceId", "hostStatus"]
         },
         "if": { "properties": { "inputRequired": { "const": true } } },
         "then": { "properties": { "ask": true }, "required": ["ask"] },
-        "else": { "properties": { "ask": false } }
+        "else": { "properties": { "ask": false } },
+        "allOf": [
+          {
+            "if": { "properties": { "host": true }, "required": ["host"] },
+            "then": {
+              "properties": {
+                "instanceId": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "canView": { "const": false }
+              }
+            }
+          },
+          {
+            "if": { "required": ["hostStatus"], "properties": { "hostStatus": { "const": "live" } } },
+            "then": { "properties": { "available": { "const": true } } },
+            "else": {
+              "properties": { "available": { "const": false } }
+            }
+          },
+          {
+            "if": { "required": ["available"], "properties": { "available": { "const": false } } },
+            "then": {
+              "properties": { "canControl": { "const": false }, "busy": false }
+            }
+          }
+        ]
       }
+    },
+    "hosts": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["host", "status", "ageSeconds"],
+        "properties": {
+          "host": { "$ref": "#/properties/sessions/items/properties/host" },
+          "status": { "$ref": "#/properties/sessions/items/properties/hostStatus" },
+          "ageSeconds": {
+            "anyOf": [
+              { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+              { "type": "null" }
+            ]
+          },
+          "error": {
+            "type": "string",
+            "maxLength": 512
+          }
+        },
+        "if": { "properties": { "status": { "const": "never" } } },
+        "then": { "properties": { "ageSeconds": { "type": "null" } } },
+        "else": { "properties": { "ageSeconds": { "type": "integer" } } }
+      }
+    },
+    "fleetStatus": {
+      "enum": ["ok", "unreachable"]
     }
   }
 }

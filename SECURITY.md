@@ -5,6 +5,13 @@
 OMP Session Gateway v0.4.0 is the current qualified stable release and works with stock OMP
 `>= 18.1.20` through its native discovery/query contract. No OMP fork or custom build is required. Use only the exact host/client/deployment combinations advertised in [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md); do not expose the loopback backend directly, enable Tailscale Funnel, use Portal Tunnel or another forwarder, or treat an unqualified platform or background Web Push as supported.
 
+The private flosrn fork additionally defines a Cloudflare Access/fleet variant; it is not covered
+by upstream artifact qualification. Use its explicit `cloudflare-access` authenticator, never a
+tunnel into `tailscale-serve`, and verify the private gateway-only bridge/process isolation before
+deployment. See [the fork boundary and revocation limits](docs/SECURITY.md#private-flosrn-access-and-fleet-boundary)
+and [fork evidence](docs/COMPATIBILITY.md#private-flosrn-fork-evidence). Access revoke does not
+terminate an already-open OMP collaboration connection.
+
 ## Reporting a vulnerability
 
 Please report suspected vulnerabilities privately through this repository's [GitHub Security Advisories](https://github.com/alphastorm/omp-session-gateway/security/advisories/new). Do not open a public issue containing:

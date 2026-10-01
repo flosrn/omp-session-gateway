@@ -18,6 +18,85 @@ export const MAX_PUSH_SUBSCRIPTION_BYTES = 8 * 1024;
 export const MAX_REQUEST_ID_BYTES = 128;
 export const MAX_PUSH_PENDING_COUNT = 1_000;
 
+/** Machine name as HarnessOS `hosts.toml` spells it; also the first half of a fleet identity. */
+export const FLEET_HOST_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/u;
+/** OMP's native instance id as HarnessOS validates it before it reaches the gateway. */
+export const FLEET_NATIVE_INSTANCE_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/u;
+export const MAX_FLEET_HOSTS = 64;
+export const MAX_FLEET_HOST_ERROR_CODEPOINTS = 512;
+
+/**
+ * Freshness of one fleet machine's reading, on the HarnessOS hub's clock: `live` is current,
+ * `stale` is the last good reading kept for display, `never` has had no reading since the hub
+ * started. Only a `live` machine's sessions can be launched.
+ */
+export type FleetHostStatus = "live" | "stale" | "never";
+/**
+ * Reachability of the fleet directory itself, not of one machine. `ok` means the latest bridge
+ * listing succeeded, even when that listing is empty. `unreachable` means no listing has succeeded
+ * since boot, or the latest poll failed. Absent on a standalone gateway. Not a capability.
+ */
+export type FleetDirectoryStatus = "ok" | "unreachable";
+
+
+/** One machine in a federated directory; present even when the machine holds no session. */
+export interface FleetHostSummary {
+  readonly host: string;
+  readonly status: FleetHostStatus;
+  readonly ageSeconds: number | null;
+  readonly error?: string;
+}
+
+/** HarnessOS session state, collapsed by the hub; `needs-input` wins over `working`. */
+export type FleetSessionState = "needs-input" | "working" | "idle" | "unknown";
+
+/**
+ * One OMP session as the HarnessOS bridge reports it, after strict validation. Metadata only:
+ * the bridge never sends a link in a listing. `generation === null` comes from an OMP that does
+ * not report one; such a session has no launchable identity and never reaches the directory.
+ */
+export interface FleetBridgeSession {
+  readonly instanceId: string;
+  readonly generation: number | null;
+  readonly sessionId: string | null;
+  readonly title: string | null;
+  readonly pid: number;
+  readonly cwd: string | null;
+  readonly model: { readonly provider: string | null; readonly id: string | null } | null;
+  readonly roomSince: number | null;
+  readonly state: FleetSessionState;
+  readonly guests: number;
+  readonly relayConnected: boolean;
+  readonly tmuxSession: string | null;
+  /** Omitted by a hub that predates access reporting: unknown, so never controllable. */
+  readonly canControl?: boolean;
+}
+
+export interface FleetBridgeHost {
+  readonly host: string;
+  readonly source: "hub" | "mac";
+  readonly status: FleetHostStatus;
+  readonly ageSeconds: number | null;
+  readonly error: string | null;
+  readonly sessions: readonly FleetBridgeSession[];
+}
+
+/** `GET /gateway/sessions` on the HarnessOS bridge: the hub's live document, unchanged. */
+export interface FleetBridgeSnapshot {
+  readonly hosts: readonly FleetBridgeHost[];
+}
+
+export const FLEET_LINK_ERRORS = [
+  "not-found",
+  "stale-generation",
+  "unavailable",
+  "invalid-link",
+  "timeout",
+  "token-refused",
+  "bad-target",
+  "too-large",
+] as const;
+export type FleetLinkError = (typeof FLEET_LINK_ERRORS)[number];
 
 export type LaunchMode = "view" | "control";
 /**
@@ -92,6 +171,15 @@ export interface ObservedSessionInput {
   readonly inputRequired: boolean;
   /** Omitted means activity is unknown, not idle. */
   readonly busy?: boolean;
+  /**
+   * Fleet-only, all four together or none. `instanceId` is then
+   * SHA-256(host + "\0" + originalInstanceId) in lowercase hex: a directory identity, never a
+   * capability. `available: false` means the row is shown but cannot be launched or notified.
+   */
+  readonly host?: string;
+  readonly originalInstanceId?: string;
+  readonly hostStatus?: FleetHostStatus;
+  readonly available?: boolean;
 }
 
 export interface SessionAskMetadata {
@@ -115,15 +203,30 @@ export interface SessionMetadata {
   readonly inputRequired: boolean;
   readonly busy?: boolean;
   readonly ask?: SessionAskMetadata;
+  /** Fleet-only, all four together or none; see `ObservedSessionInput`. */
+  readonly host?: string;
+  readonly originalInstanceId?: string;
+  readonly hostStatus?: FleetHostStatus;
+  readonly available?: boolean;
 }
 
 export interface SessionListResponse {
   readonly revision: number;
   readonly sessions: readonly SessionMetadata[];
+  /** Fleet machines, including empty and unreachable ones; absent from a standalone gateway. */
+  readonly hosts?: readonly FleetHostSummary[];
+  /** Bridge reachability; absent on a standalone gateway, independent of each machine's status. */
+  readonly fleetStatus?: FleetDirectoryStatus;
 }
 
 export type SessionEvent =
-  | { readonly type: "snapshot"; readonly revision: number; readonly sessions: readonly SessionMetadata[] }
+  | {
+      readonly type: "snapshot";
+      readonly revision: number;
+      readonly sessions: readonly SessionMetadata[];
+      readonly hosts?: readonly FleetHostSummary[];
+      readonly fleetStatus?: FleetDirectoryStatus;
+    }
   | { readonly type: "session_upsert"; readonly revision: number; readonly session: SessionMetadata }
   | {
       readonly type: "session_remove";

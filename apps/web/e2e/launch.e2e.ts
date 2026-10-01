@@ -1222,10 +1222,11 @@ test("a bfcache restore whose session changed generation returns to the live dir
     await page.locator('.working-row[data-instance-id="working-session-0000"]').click();
     await expect(page).toHaveURL(`${fixture.origin}/client/`);
     await expect(page.locator("#root > .sh-app")).toHaveCount(1);
+    // One tap opens Control whenever the session offers it.
     expect(fixture.launchRequests[1]).toEqual({
       instanceId: "working-session-0000",
       generation: 1,
-      mode: "view",
+      mode: "control",
     });
     expect(await relaySocketCount(page)).toBeGreaterThan(bootstrapSocketCount);
 
@@ -1298,7 +1299,16 @@ test("a bfcache restore reopens the backgrounded session and stores no capabilit
     }));
     expect(residue.url).toBe(`${fixture.origin}/client/`);
     expect(residue.historyState).not.toContain("standalone-launch-0001");
-    expect(JSON.parse(residue.localStorage)).toEqual({ "omp.collab.name": "guest" });
+    // The only trace of the session is the metadata a reload needs to offer it again.
+    expect(JSON.parse(residue.localStorage)).toEqual({
+      "omp.collab.name": "guest",
+      "omp.sessions.active.v1": JSON.stringify({
+        version: 1,
+        instanceId: "standalone-launch-0001",
+        generation: 1,
+        mode: "control",
+      }),
+    });
     expect(residue.sessionStorage).toBe("{}");
     expect(residue.cacheUrls.every(url => !url.includes("/api/") && !url.includes("/client/"))).toBe(true);
   } finally {
@@ -1376,6 +1386,173 @@ test("backgrounding without a pagehide keeps the open session", { tag: "@core" }
     await expect(page).toHaveURL(`${fixture.origin}/client/`);
     await expect(page.locator("#root > .sh-app")).toHaveCount(1);
     await expect(page.locator(".shell-title")).toHaveText(SESSION_TITLE);
+  } finally {
+    await fixture.stop();
+  }
+});
+
+const ACTIVE_SELECTION_KEY = "omp.sessions.active.v1";
+
+function rememberedSelection(instanceId: string, mode: "view" | "control"): string {
+  return JSON.stringify({ version: 1, instanceId, generation: 1, mode });
+}
+
+function readRememberedSelection(page: Page): Promise<string | null> {
+  return page.evaluate(key => localStorage.getItem(key), ACTIVE_SELECTION_KEY);
+}
+
+/** Holds one session's launch POST until released, then lets it reach the fixture. */
+async function holdLaunch(page: Page, instanceId: string): Promise<{
+  readonly arrived: Promise<void>;
+  readonly answered: Promise<unknown>;
+  release(): void;
+}> {
+  let release = (): void => undefined;
+  const released = new Promise<void>(resolve => {
+    release = resolve;
+  });
+  let arrive = (): void => undefined;
+  const arrived = new Promise<void>(resolve => {
+    arrive = resolve;
+  });
+  const path = `/api/v1/sessions/${instanceId}/launch`;
+  await page.route(`**${path}`, async route => {
+    arrive();
+    await released;
+    await route.continue();
+  });
+  const answered = page.waitForResponse(response => new URL(response.url()).pathname === path);
+  return { arrived, answered, release: () => release() };
+}
+
+test("a full reload reopens the exact remembered session through a fresh launch", { tag: "@core" }, async ({ page }) => {
+  const fixture = await startDashboardFixture([workingSession(0), workingSession(1)]);
+
+  try {
+    await installSilentWebSocket(page);
+    await page.goto(fixture.origin);
+    await page.locator('.working-row[data-instance-id="working-session-0001"]').click();
+    await expect(page.locator("#root > .sh-app")).toHaveCount(1);
+    expect(await readRememberedSelection(page)).toBe(rememberedSelection("working-session-0001", "control"));
+
+    await page.reload();
+    await expect(page).toHaveURL(`${fixture.origin}/client/`);
+    await expect(page.locator("#root > .sh-app")).toHaveCount(1);
+    await expect(page.locator(".shell-title")).toHaveText("working-session-0001");
+    // The capability died with the old document; the reload asked the gateway again for the exact
+    // identity and generation, through the ordinary launch.
+    expect(fixture.launchRequests).toEqual([
+      { instanceId: "working-session-0001", generation: 1, mode: "control" },
+      { instanceId: "working-session-0001", generation: 1, mode: "control" },
+    ]);
+  } finally {
+    await fixture.stop();
+  }
+});
+
+for (const outcome of ["restarted", "ended"] as const) {
+  test(`a full reload stays in the directory when the remembered session ${outcome}`, async ({ page }) => {
+    const remembered = workingSession(1);
+    const fixture = await startDashboardFixture([workingSession(0), remembered]);
+
+    try {
+      await installSilentWebSocket(page);
+      await page.goto(fixture.origin);
+      await page.locator(`.working-row[data-instance-id="${remembered.instanceId}"]`).click();
+      await expect(page.locator("#root > .sh-app")).toHaveCount(1);
+
+      if (outcome === "restarted") fixture.upsert({ ...remembered, generation: 2 });
+      else fixture.remove(remembered.instanceId, 1);
+      await page.reload();
+
+      await expect(page.locator("#status-banner")).toHaveText(
+        outcome === "restarted"
+          ? "Your last session restarted, so it was not reopened. Choose a current session."
+          : "Your last session has ended. Choose a current session.",
+      );
+      await expect(page).toHaveURL(`${fixture.origin}/`);
+      await expect(page.locator(".gateway-shell")).toHaveCount(0);
+      expect(fixture.launchRequests).toHaveLength(1);
+      expect(await readRememberedSelection(page)).toBeNull();
+
+      // Refusal is final: another reload neither retries nor repeats the message.
+      await page.reload();
+      await expect(page.locator(".working-row")).toHaveCount(outcome === "restarted" ? 2 : 1);
+      await expect(page.locator("#status-banner")).toBeHidden();
+      expect(fixture.launchRequests).toHaveLength(1);
+    } finally {
+      await fixture.stop();
+    }
+  });
+}
+
+test("leaving a session explicitly forgets it, so a reload lands in the directory", async ({ page }) => {
+  const fixture = await startDashboardFixture([workingSession(0)]);
+
+  try {
+    await installSilentWebSocket(page);
+    await page.goto(fixture.origin);
+    await page.locator(".working-row").click();
+    await expect(page.locator("#root > .sh-app")).toHaveCount(1);
+    await page.locator(".shell-back").click();
+    await expect(page).toHaveURL(`${fixture.origin}/`);
+    expect(await readRememberedSelection(page)).toBeNull();
+
+    await page.reload();
+    await expect(page.locator(".working-row")).toHaveCount(1);
+    await expect(page.locator(".gateway-shell")).toHaveCount(0);
+    expect(fixture.launchRequests).toHaveLength(1);
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test("a launch that resolves late never mounts over a newer selection", async ({ page }) => {
+  const fixture = await startDashboardFixture([workingSession(0), workingSession(1)]);
+
+  try {
+    await installSilentWebSocket(page);
+    await page.goto(fixture.origin);
+    const earlier = await holdLaunch(page, "working-session-0000");
+    await page.locator('.working-row[data-instance-id="working-session-0000"]').click();
+    await earlier.arrived;
+    await page.locator('.working-row[data-instance-id="working-session-0001"]').click();
+    await expect(page.locator(".shell-title")).toHaveText("working-session-0001");
+
+    earlier.release();
+    await earlier.answered;
+    await page.waitForTimeout(250);
+    await expect(page.locator(".shell-title")).toHaveText("working-session-0001");
+    await expect(page.locator("#root > .sh-app")).toHaveCount(1);
+    expect(await readRememberedSelection(page)).toBe(rememberedSelection("working-session-0001", "control"));
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test("going back while a launch is in flight keeps the user in the directory", async ({ page }) => {
+  const active = session();
+  const fixture = await startDashboardFixture([active, workingSession(0)]);
+
+  try {
+    await installSilentWebSocket(page);
+    await page.goto(fixture.origin);
+    await page.locator(".queue-hero").getByRole("button", { name: "Transcript" }).click();
+    await expect(page.locator("#root > .sh-app")).toHaveCount(1);
+
+    const upgrade = await holdLaunch(page, active.instanceId);
+    await page.locator(".shell-control").click();
+    await upgrade.arrived;
+    await page.goBack();
+    await expect(page).toHaveURL(`${fixture.origin}/`);
+    await expect(page.locator(".queue-hero")).toHaveCount(1);
+
+    upgrade.release();
+    await upgrade.answered;
+    await page.waitForTimeout(250);
+    await expect(page).toHaveURL(`${fixture.origin}/`);
+    await expect(page.locator(".gateway-shell")).toHaveCount(0);
+    expect(await readRememberedSelection(page)).toBeNull();
   } finally {
     await fixture.stop();
   }

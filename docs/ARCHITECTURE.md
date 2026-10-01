@@ -56,6 +56,27 @@ Responsibilities:
 
 The registry is intentionally empty after daemon restart. The next host poll repopulates it; no capability store exists.
 
+### Private flosrn fleet variant
+
+With `federation` configured, the daemon replaces standalone OMP discovery with the HarnessOS
+fleet directory and Control broker. It polls a private gateway-only Unix socket with a separate
+bearer token, never the Hub's owner/admin socket. The bridge exposes only `/gateway/sessions`
+and `/gateway/open`; it does not grant Hub roles or administration.
+
+The registry stays metadata-only and memory-only. A fleet card's `instanceId` is lowercase
+SHA-256 of `host + "\0" + originalInstanceId`, not a capability. Host summaries include empty,
+stale and never-read machines. A failed bridge poll retains cards as unavailable rather than
+pretending their sessions ended. Control launches check identity, generation, availability,
+freshness and any attention request before and after the bridge request; View is refused.
+
+The fork's `cloudflare-access` mode uses a loopback Cloudflare Tunnel origin and independently
+verifies a pinned Access application JWT. It never falls back to Serve headers. Browser mutations
+still require the exact public origin. Standalone `tailscale-serve` retains its existing invariants.
+The PWA remembers only a versioned instance/generation/mode selection for reload and foreground
+resume, then obtains a fresh capability through the normal broker. Push uses the same host-qualified
+metadata identity; unavailable cards produce neither attention nor activity-stop notifications.
+
+
 ### 1.4 OMP Sessions PWA
 
 The PWA is a deliberately small session directory and launcher.
@@ -69,7 +90,8 @@ Each card may show only non-secret metadata:
 - health/streaming state if available without transcript data;
 - boolean response-required state, rendered as **Needs attention**, with an opaque request identity
   and receipt timestamp but no prompt content or answer data;
-- **View** for ordinary read-only launches and **Open request** for attention requiring Control;
+- **Control** as the primary action when available and permitted; **View** only for standalone
+  read-only sessions, and **Open request** for attention requiring Control;
 - **Hold for desk** for exact-ask local queue routing; and
 - **Hide** for reversible device-local hiding of non-attention rows, presented as a
   compact per-row control with an explicit accessible label.

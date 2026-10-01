@@ -1,3 +1,4 @@
+import { CLOUDFLARE_ACCESS_ASSERTION_HEADER, AccessKeysUnavailable, type CloudflareAccessVerifier } from "./access.ts";
 import { loopbackHttpOrigin, type GatewayConfig } from "./config.ts";
 
 export interface RequestPeer {
@@ -5,8 +6,21 @@ export interface RequestPeer {
 }
 
 export type AuthorizationResult =
-  | { readonly allowed: true; readonly identityKey: string }
-  | { readonly allowed: false; readonly reason: "unauthorized" | "identity_untrustworthy" };
+  | {
+      readonly allowed: true;
+      readonly identityKey: string;
+      /**
+       * Present only for identities that lapse on their own (Cloudflare Access). Compares the
+       * admitted token's expiry with the verifier clock; it does not fetch keys again. Anything
+       * long-lived that was admitted by this result, such as an event stream or a launch still in
+       * flight, must stop once it resolves false.
+       */
+      readonly revalidate?: () => boolean | Promise<boolean>;
+    }
+  | {
+      readonly allowed: false;
+      readonly reason: "unauthorized" | "identity_untrustworthy" | "forbidden_identity" | "keys_unavailable";
+    };
 
 export function isLoopbackAddress(address: string): boolean {
   const lower = address.toLowerCase();
@@ -90,12 +104,13 @@ export function normalizeTailscaleLogin(value: string): string | undefined {
  * peer (#98). Callers pass a measured value; there is no default, because a caller that forgot this
  * argument would be reintroducing the bypass.
  */
-export function authorizeHttpRequest(
+export async function authorizeHttpRequest(
   request: Request,
   peer: RequestPeer | undefined,
   config: GatewayConfig,
   serveOwnsIdentityHeaders: boolean,
-): AuthorizationResult {
+  accessVerifier?: CloudflareAccessVerifier,
+): Promise<AuthorizationResult> {
   if (peer === undefined || !isLoopbackAddress(peer.address)) return { allowed: false, reason: "unauthorized" };
   // Dispatch on the mode explicitly and fall through to a refusal. Reading the Tailscale identity
   // header used to be the implicit default for "not dev-localhost", so a mode added later — a
@@ -106,6 +121,8 @@ export function authorizeHttpRequest(
       return authorizeDevLocalhost(request, config);
     case "tailscale-serve":
       return authorizeTailscaleServe(request, config, serveOwnsIdentityHeaders);
+    case "cloudflare-access":
+      return authorizeCloudflareAccess(request, config, accessVerifier);
     default:
       return { allowed: false, reason: "identity_untrustworthy" };
   }
@@ -144,6 +161,47 @@ function authorizeTailscaleServe(
     return { allowed: false, reason: "unauthorized" };
   }
   return { allowed: true, identityKey: login };
+}
+
+/**
+ * Only a signed Access application token is identity here. Tailscale and Cloudflare's convenience
+ * identity headers are never read in this mode, and there is no service-token or header fallback:
+ * a missing, forged, or expired token is `unauthorized`. A token that verifies but names an email
+ * outside the allowlist is `forbidden_identity`: signing in again cannot change that.
+ *
+ * Admission verifies the signature against the team key set. A token revoked at Cloudflare stays
+ * valid here until its `exp`. `revalidate` records that expiry and the verifier clock; it does not
+ * fetch keys again, so a later outage cannot end an already-admitted stream. A Collab capability
+ * already handed to the browser is a bearer secret outside this check and lasts until OMP revokes
+ * the room. Detecting revocation would need Access identity introspection, which this gateway
+ * deliberately does not do.
+ */
+async function authorizeCloudflareAccess(
+  request: Request,
+  config: GatewayConfig,
+  verifier: CloudflareAccessVerifier | undefined,
+): Promise<AuthorizationResult> {
+  if (verifier === undefined) return { allowed: false, reason: "identity_untrustworthy" };
+  const assertion = request.headers.get(CLOUDFLARE_ACCESS_ASSERTION_HEADER);
+  if (assertion === null) return { allowed: false, reason: "unauthorized" };
+  let identity;
+  try {
+    identity = await verifier.verify(assertion);
+  } catch (error) {
+    if (error instanceof AccessKeysUnavailable) return { allowed: false, reason: "keys_unavailable" };
+    return { allowed: false, reason: "unauthorized" };
+  }
+  if (identity === undefined) return { allowed: false, reason: "unauthorized" };
+  const login = normalizeTailscaleLogin(identity.email);
+  if (login === undefined || !config.auth.allowedLogins.includes(login)) {
+    return { allowed: false, reason: "forbidden_identity" };
+  }
+  const expiresAtMs = identity.expiresAtMs;
+  return {
+    allowed: true,
+    identityKey: login,
+    revalidate: () => verifier.now() < expiresAtMs,
+  };
 }
 
 export function requestHasValidMutationContext(request: Request, expectedOrigin: string): boolean {

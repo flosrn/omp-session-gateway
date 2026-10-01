@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import {
   sessionMetadataFromObserved,
+  type FleetDirectoryStatus,
+  type FleetHostSummary,
   type LaunchMode,
   type ObservedSessionInput,
   type SessionEvent,
@@ -39,7 +41,8 @@ export type UpsertResult = "inserted" | "updated" | "ignored_older";
 
 /**
  * One poll of OMP's discovery directory. `observed` hosts answered a snapshot; `retained` hosts are
- * published but were unreadable this round, so their records survive until the TTL expires them.
+ * published but were unreadable this round, so their records survive until the TTL expires them —
+ * a retained fleet record also turns unavailable, since nothing vouches for it any more.
  * Anything in neither set is finished and is dropped immediately.
  */
 export interface ObservedDirectory {
@@ -63,6 +66,37 @@ function cloneMetadata(metadata: SessionMetadata): SessionMetadata {
   return { ...metadata, ...(metadata.ask === undefined ? {} : { ask: { ...metadata.ask } }) };
 }
 
+function cloneHosts(hosts: readonly FleetHostSummary[]): FleetHostSummary[] {
+  return hosts.map(host => ({ ...host }));
+}
+function directoryFields(
+  hosts: readonly FleetHostSummary[] | undefined,
+  fleetStatus: FleetDirectoryStatus | undefined,
+): Pick<SessionListResponse, "hosts" | "fleetStatus"> {
+  return {
+    ...(hosts === undefined ? {} : { hosts: cloneHosts(hosts) }),
+    ...(fleetStatus === undefined ? {} : { fleetStatus }),
+  };
+}
+
+
+/**
+ * A reading's age ticks on every poll. Live ages are not worth a revision, and a stale age is
+ * worth one per minute, so a quiet fleet does not rebroadcast its whole directory every poll.
+ */
+function sameHostsForBroadcast(left: readonly FleetHostSummary[] | undefined, right: readonly FleetHostSummary[]): boolean {
+  return (
+    left !== undefined &&
+    left.length === right.length &&
+    left.every((host, index) => {
+      const other = right[index];
+      return other !== undefined && host.host === other.host && host.status === other.status &&
+        host.error === other.error &&
+        (host.status === "live" || Math.floor((host.ageSeconds ?? -60) / 60) === Math.floor((other.ageSeconds ?? -60) / 60));
+    })
+  );
+}
+
 export type LaunchAuthorization =
   | { readonly status: "ok"; readonly session: SessionMetadata }
   | { readonly status: "missing" }
@@ -83,6 +117,10 @@ export class SessionRegistry {
   #pendingHead = 0;
   #dispatching = false;
   #revision = 0;
+  /** Fleet machine summaries; undefined for a standalone gateway, which never publishes `hosts`. */
+  #hosts: readonly FleetHostSummary[] | undefined;
+  /** Bridge reachability; undefined for a standalone gateway, which never publishes `fleetStatus`. */
+  #fleetStatus: FleetDirectoryStatus | undefined;
 
   constructor(options: RegistryOptions) {
     if (!Number.isSafeInteger(options.ttlSeconds) || options.ttlSeconds < 1) throw new Error("invalid registry TTL");
@@ -109,7 +147,46 @@ export class SessionRegistry {
       sessions: [...this.#metadata.values()]
         .map(record => cloneMetadata(record.metadata))
         .sort((left, right) => right.startedAt.localeCompare(left.startedAt)),
+      ...directoryFields(this.#hosts, this.#fleetStatus),
     };
+  }
+
+  /**
+   * Replaces the fleet machine summaries. They are directory state, not session state, so a
+   * material change spends one revision and is published as a fresh snapshot. An age-only change
+   * is stored for the next reader without a revision; see `sameHostsForBroadcast`.
+   */
+  setHosts(hosts: readonly FleetHostSummary[], fleetStatus?: FleetDirectoryStatus): void {
+    const nextStatus = fleetStatus ?? this.#fleetStatus;
+    const material = !sameHostsForBroadcast(this.#hosts, hosts) || nextStatus !== this.#fleetStatus;
+    this.#hosts = cloneHosts(hosts);
+    if (nextStatus !== undefined) this.#fleetStatus = nextStatus;
+    if (!material) return;
+    const { sessions } = this.snapshot();
+    this.#revision += 1;
+    this.#emit({
+      type: "snapshot",
+      revision: this.#revision,
+      sessions,
+      ...directoryFields(this.#hosts, this.#fleetStatus),
+    });
+  }
+
+  /**
+   * Publishes bridge reachability. A repeated status is stored as the same value and spends no
+   * revision; only a change is a new snapshot. Standalone registries never call this.
+   */
+  setFleetStatus(status: FleetDirectoryStatus): void {
+    if (this.#fleetStatus === status) return;
+    this.#fleetStatus = status;
+    const { sessions } = this.snapshot();
+    this.#revision += 1;
+    this.#emit({
+      type: "snapshot",
+      revision: this.#revision,
+      sessions,
+      ...directoryFields(this.#hosts, this.#fleetStatus),
+    });
   }
 
   subscribe(listener: (event: SessionEvent) => void): () => void {
@@ -165,7 +242,12 @@ export class SessionRegistry {
     try {
       const snapshot = this.snapshot();
       snapshotRevision = snapshot.revision;
-      listener({ type: "snapshot", revision: snapshot.revision, sessions: snapshot.sessions });
+      listener({
+        type: "snapshot",
+        revision: snapshot.revision,
+        sessions: snapshot.sessions,
+        ...directoryFields(snapshot.hosts, snapshot.fleetStatus),
+      });
       // Indexed rather than shifted: the gate keeps appending while this drains, and those late
       // arrivals belong at the tail of the same ordered replay.
       for (let index = 0; index < buffered.length; index += 1) {
@@ -201,7 +283,8 @@ export class SessionRegistry {
     for (const [instanceId, record] of [...this.#metadata.entries()]) {
       if (live.has(instanceId)) continue;
       if (directory.retained.has(instanceId)) {
-        this.#forgetActivity(record);
+        if (record.metadata.host === undefined) this.#forgetActivity(record);
+        else this.#markUnavailable(record);
         continue;
       }
       this.#removeRecord(instanceId, record.metadata.generation);
@@ -212,6 +295,14 @@ export class SessionRegistry {
 
   #observe(input: ObservedSessionInput): UpsertResult {
     const existing = this.#metadata.get(input.instanceId);
+    // A directory identity names one machine's one OMP instance for good. A different claimant
+    // (a hash collision, or a standalone record meeting a fleet one) never inherits the card.
+    if (
+      existing !== undefined &&
+      (existing.metadata.host !== input.host || existing.metadata.originalInstanceId !== input.originalInstanceId)
+    ) {
+      return "ignored_older";
+    }
     if (existing !== undefined && input.generation < existing.metadata.generation) {
       this.#forgetActivity(existing);
       return "ignored_older";
@@ -268,6 +359,26 @@ export class SessionRegistry {
     this.#emit({ type: "session_upsert", revision: this.#revision, session: cloneMetadata(metadata) });
   }
 
+  /**
+   * A fleet record nothing vouched for this round keeps its card but loses everything that would
+   * let it be launched or notified: it can no longer be Controlled, its activity is unknown, and a
+   * `live` machine reads `stale`. Liveness is not refreshed, so the TTL still retires it.
+   */
+  #markUnavailable(record: InternalMetadataRecord): void {
+    const { busy: _busy, ...rest } = record.metadata;
+    const metadata: SessionMetadata = {
+      ...rest,
+      canControl: false,
+      hostStatus: rest.hostStatus === "live" ? "stale" : rest.hostStatus ?? "stale",
+      available: false,
+    };
+    record.activityStopRevision = undefined;
+    if (this.#unchanged(record.metadata, metadata)) return;
+    record.metadata = metadata;
+    this.#revision += 1;
+    this.#emit({ type: "session_upsert", revision: this.#revision, session: cloneMetadata(metadata) });
+  }
+
   /** Compares everything a browser renders, ignoring the liveness stamp that moves every poll. */
   #unchanged(left: SessionMetadata, right: SessionMetadata): boolean {
     return (
@@ -280,20 +391,27 @@ export class SessionRegistry {
       left.canControl === right.canControl &&
       left.inputRequired === right.inputRequired &&
       left.busy === right.busy &&
-      left.ask?.requestId === right.ask?.requestId
+      left.ask?.requestId === right.ask?.requestId &&
+      left.host === right.host &&
+      left.originalInstanceId === right.originalInstanceId &&
+      left.hostStatus === right.hostStatus &&
+      left.available === right.available
     );
   }
 
   /**
    * Confirms the directory still shows this exact session before the gateway asks its host for a
    * capability. Metadata is the whole basis for the check: the capability itself lives in OMP.
+   * An unavailable fleet row is shown but is not a launchable session, so it reads as missing.
    */
   authorizeLaunch(instanceId: string, generation: number, mode: LaunchMode, requestId?: string): LaunchAuthorization {
     this.sweepExpired();
     const record = this.#metadata.get(instanceId);
     if (record === undefined) return { status: "missing" };
     if (record.metadata.generation !== generation) return { status: "generation_mismatch" };
+    if (record.metadata.available === false) return { status: "missing" };
     if (mode === "control" && !record.metadata.canControl) return { status: "mode_unavailable" };
+    if (mode === "view" && !record.metadata.canView) return { status: "mode_unavailable" };
     if (
       requestId !== undefined &&
       (mode !== "control" || !record.metadata.inputRequired || record.metadata.ask?.requestId !== requestId)
@@ -332,7 +450,13 @@ export class SessionRegistry {
     for (const listener of listeners) {
       try {
         const copy = "session" in event ? { ...event, session: cloneMetadata(event.session) }
-          : event.type === "snapshot" ? { ...event, sessions: event.sessions.map(cloneMetadata) } : { ...event };
+          : event.type === "snapshot"
+            ? {
+                ...event,
+                sessions: event.sessions.map(cloneMetadata),
+                ...(event.hosts === undefined ? {} : { hosts: cloneHosts(event.hosts) }),
+              }
+            : { ...event };
         listener(copy);
       } catch (error) {
         // Observers cannot interrupt revocation or starve other observers, even if reporting fails.

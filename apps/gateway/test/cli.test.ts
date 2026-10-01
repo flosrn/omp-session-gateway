@@ -992,7 +992,7 @@ describe("managed-service readiness budget", () => {
  * no launchctl/systemctl/schtasks mutation or module mock escapes this disposable process.
  */
 async function runPruningInstall(
-  mode: "ready" | "not-ready" | "revert-failure" | "no-start" | "prune-failure",
+  mode: "ready" | "not-ready" | "revert-failure" | "no-start" | "prune-failure" | "access-no-start",
 ): Promise<SandboxRun> {
   return runInSandbox(async root => {
     const entry = join(root, "install-fixture.ts");
@@ -1004,7 +1004,7 @@ import { chmod, mkdir, readdir, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import * as installation from ${modulePath("installation")};
 import * as service from ${modulePath("service")};
-import { writeGatewayConfigFile } from ${modulePath("config")};
+import { writeGatewayConfigFile, loadGatewayConfig } from ${modulePath("config")};
 import { StaticAssetStore } from ${modulePath("static")};
 const mode = ${JSON.stringify(mode)};
 const sourceRoot = join(${JSON.stringify(root)}, "source");
@@ -1027,6 +1027,12 @@ const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
 }});
 const config = await writeGatewayConfigFile({ publicOrigin: "https://gateway.example.ts.net",
   allowedLogins: ["user@example.com"], port: server.port });
+if (mode === "access-no-start") {
+  await writeGatewayConfigFile({ publicOrigin: config.http.publicOrigin, allowedLogins: ["user@example.com"],
+    mode: "cloudflare-access", cloudflareAccess: {
+      teamDomain: "https://team.cloudflareaccess.com", audience: "a".repeat(64),
+    } });
+}
 await writeFile(config.paths.tokenPath, token + "\n", { mode: 0o600 });
 const runtimes = [];
 const stage = installation.stageRuntimePayload;
@@ -1038,7 +1044,7 @@ for (const index of [0, 1, 2, 1]) await installation.activateRuntime(config, run
 const versions = dirname(runtimes[0].directory);
 const names = runtimes.map(runtime => basename(runtime.directory));
 const render = service.serviceDefinition;
-let active = mode !== "no-start";
+let active = mode !== "no-start" && mode !== "access-no-start";
 let attempts = 0;
 const before = (await readdir(versions)).sort();
 const definition = render(config, process.platform, runtimes[1].cliPath);
@@ -1073,15 +1079,16 @@ try {
   let failure = "";
   try {
     await main(["install", "--origin=https://gateway.example.ts.net", "--allow=user@example.com",
-      ...(mode === "no-start" ? ["--no-start"] : [])]);
+      ...(mode === "no-start" || mode === "access-no-start" ? ["--no-start"] : [])]);
   } catch (error) { failure = error.message; }
+  const installedAuth = (await loadGatewayConfig()).auth;
   const after = (await readdir(versions)).sort();
   const current = basename((await installation.currentInstalledRuntime(config)).directory);
   const predecessor = basename((await installation.resolveRollbackTarget(config)).runtime.directory);
   let prunedTarget = "";
   try { await main(["rollback", "--to=" + names[0]]); } catch (error) { prunedTarget = error.message; }
   const afterRollback = (await readdir(versions)).sort();
-  console.log(JSON.stringify({ before, after, afterRollback, current, predecessor, names, failure, prunedTarget }));
+  console.log(JSON.stringify({ before, after, afterRollback, current, predecessor, names, failure, prunedTarget, installedAuth }));
 } finally {
   await chmod(versions, 0o700);
   server.stop(true);
@@ -1092,6 +1099,18 @@ try {
 }
 
 describe("install runtime pruning", () => {
+  test("manual reinstall keeps Cloudflare Access mode and its verifier settings", async () => {
+    const run = await runPruningInstall("access-no-start");
+    expect(run.exitCode).toBe(0);
+    const state = JSON.parse(run.stdout.trimEnd().split("\n").at(-1) ?? "");
+    expect(state.failure).toBe("");
+    expect(state.installedAuth).toEqual({
+      mode: "cloudflare-access",
+      allowedLogins: ["user@example.com"],
+      cloudflareAccess: { teamDomain: "https://team.cloudflareaccess.com", audience: "a".repeat(64) },
+    });
+  });
+
   test("successful ready install retains only three distinct activations and preserves rollback", async () => {
     const run = await runPruningInstall("ready");
     expect(run.stderr).toBe("");
@@ -1144,4 +1163,30 @@ describe("install runtime pruning", () => {
     expect(state.predecessor).toBe(state.names[1]);
     expect(run.stdout).toContain("retained 3, removed 0, failed 32");
   });
+});
+
+test("fleet serve exits when push initialization fails", async () => {
+  const run = await runInSandbox(async root => {
+    await seedSandbox(root, {
+      config: {
+        ...devLocalhostConfig(4317),
+        federation: { socketPath: "/run/omp-hub/gateway.sock", tokenFile: "/etc/omp-gateway/hub-token", pollSeconds: 5 },
+      },
+      token: SEEDED_TOKEN,
+    });
+    const entry = join(root, "push-init-failure.ts");
+    const modulePath = (name: string) => JSON.stringify(fileURLToPath(new URL(`../src/${name}.ts`, import.meta.url)));
+    await writeFile(entry, `
+import { StaticAssetStore } from ${modulePath("static")};
+import { PushService } from ${modulePath("push")};
+import { main } from ${JSON.stringify(GATEWAY_CLI)};
+StaticAssetStore.load = async () => ({});
+PushService.open = async () => { throw new Error("synthetic push init failure"); };
+try { await main(["serve"]); }
+catch (error) { console.error(error.message); process.exitCode = 1; }
+`);
+    return [process.execPath, entry];
+  });
+  expect(run.exitCode).toBe(1);
+  expect(run.stderr).toContain("synthetic push init failure");
 });

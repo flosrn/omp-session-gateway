@@ -8,6 +8,13 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- In the private flosrn fork, add loopback-only `cloudflare-access` authentication with pinned
+  RS256 application JWT verification and email allowlisting, plus optional HarnessOS fleet
+  federation through a private gateway-only socket and separate bearer token.
+- Add host-qualified metadata cards and host status summaries, one-tap Control, and exact-generation
+  reload/foreground resume from metadata-only selection storage. Fleet View is refused, not upgraded
+  to Control. Push routing uses the host-qualified directory identity and excludes unavailable rows.
+  These additions do not inherit upstream production or physical-device qualification.
 - Extend the upstream OMP canary with new-session, immediate fork, in-session rewind, and saved
   session continuation checks. Windows runs continuation and explicitly skips the three
   keystroke-driven stages; bounded summaries include the platform.

@@ -10,6 +10,7 @@ import {
   parsePushSubscriptionResponse,
   parseSessionEvent,
   parseSessionListResponse,
+  type FleetHostSummary,
   type LaunchMode,
   type NotificationLaunchIntent,
   type SessionEvent,
@@ -80,6 +81,18 @@ const HELD_ASKS_STORAGE_KEY = "omp.sessions.held-asks.v1";
 const DISMISSED_SESSIONS_STORAGE_KEY = "omp.sessions.dismissed.v1";
 const MAX_LOCAL_STORAGE_BYTES = 512_000;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/u;
+/**
+ * The one session this device last opened, so a full reload can offer it again. Metadata only —
+ * `{version, instanceId, generation, mode}` — never a capability, URL, title, question, or transcript.
+ */
+const ACTIVE_SELECTION_STORAGE_KEY = "omp.sessions.active.v1";
+const ACTIVE_SELECTION_VERSION = 1;
+const MAX_ACTIVE_SELECTION_BYTES = 256;
+/**
+ * Cloudflare Access answers an expired session with 401 instead of a cross-origin login redirect
+ * when a request carries this header, so the page can offer sign-in rather than retry blindly.
+ */
+const API_REQUEST_HEADERS: Readonly<Record<string, string>> = { "X-Requested-With": "XMLHttpRequest" };
 type TransportFailureKind = "offline" | "tailnet" | "desktop" | "gateway";
 
 interface HeldAsk {
@@ -124,6 +137,18 @@ let pendingLaunches = 0;
 let workerUpdatePending = false;
 let updateReloadTimeout: number | undefined;
 let pendingDismissToast: PendingDismissToast | undefined;
+/** Fleet machines from the latest snapshot; `undefined` on a standalone gateway. */
+let hosts: readonly FleetHostSummary[] | undefined;
+/**
+ * Directory-level fleet reachability. Absent means a standalone gateway or a fleet listing that
+ * has not said; `"unreachable"` is a bridge that has never produced a directory, not an empty one.
+ */
+let fleetStatus: "ok" | "unreachable" | undefined;
+/**
+ * Bumped by every explicit selection — a launch, a resume, or leaving a session — so an earlier
+ * launch that resolves late can never mount over what the user chose since.
+ */
+let selectionSequence = 0;
 
 type NotificationControlState =
   | "checking"
@@ -172,6 +197,12 @@ interface DisposedShellResume {
   readonly generation: number;
   readonly mode: LaunchMode;
   readonly requestId?: string;
+}
+
+interface ActiveSelection {
+  readonly instanceId: string;
+  readonly generation: number;
+  readonly mode: LaunchMode;
 }
 
 let dashboardSnapshot: DashboardSnapshot | undefined;
@@ -283,7 +314,7 @@ async function savePushSubscription(
   });
   const response = await fetch("/api/v1/push/subscription", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { ...API_REQUEST_HEADERS, "Content-Type": "application/json" },
     body: JSON.stringify(request),
     cache: "no-store",
     credentials: "same-origin",
@@ -345,7 +376,9 @@ function acceptNotificationRoute(event: MessageEvent): void {
   event.ports[0]?.postMessage({ type: "omp-notification-route-accepted", version: PUSH_API_VERSION });
   pendingNotificationLaunch = intent;
   pendingNotificationRoute = true;
-  notificationRouteStatusLocked = true;
+  intentStatusLocked = true;
+  // A tapped alert is a newer explicit intent than the session remembered across a reload.
+  pendingResume = undefined;
   void refreshAndConnect();
 }
 
@@ -389,7 +422,7 @@ async function initializeNotifications(
   try {
     const [registered, configResponse] = await Promise.all([
       workerRegistration,
-      fetch("/api/v1/push/config", { cache: "no-store", credentials: "same-origin" }),
+      fetch("/api/v1/push/config", { headers: API_REQUEST_HEADERS, cache: "no-store", credentials: "same-origin" }),
     ]);
     if (registered === undefined) {
       setNotificationControl("unavailable");
@@ -437,7 +470,7 @@ async function disableBackgroundNotifications(): Promise<void> {
     await existing.unsubscribe();
     await fetch("/api/v1/push/subscription", {
       method: "DELETE",
-      headers: { "Content-Type": "application/json" },
+      headers: { ...API_REQUEST_HEADERS, "Content-Type": "application/json" },
       body: JSON.stringify({ version: PUSH_API_VERSION, endpoint }),
       cache: "no-store",
       credentials: "same-origin",
@@ -491,8 +524,11 @@ function readPendingNotificationLaunch(): NotificationLaunchIntent | undefined {
 }
 
 let pendingNotificationRoute = location.pathname === "/collab" || location.pathname.startsWith("/collab/");
-let notificationRouteStatusLocked = pendingNotificationRoute;
+/** A routed intent's outcome stays on screen; directory events must not reset it to ready. */
+let intentStatusLocked = pendingNotificationRoute;
 let pendingNotificationLaunch = readPendingNotificationLaunch();
+/** A notification route is the newer intent; otherwise offer the session open before the reload. */
+let pendingResume = pendingNotificationRoute ? undefined : readActiveSelection();
 
 if (location.pathname === "/update/" || location.pathname === "/client/") {
   history.replaceState(null, "", "/");
@@ -506,6 +542,59 @@ function setStatus(kind: StatusKind, message: string): void {
   statusBanner.replaceChildren();
   statusBanner.textContent = message;
   statusBanner.hidden = kind === "ready";
+}
+
+function isSignInRequired(response: Response): boolean {
+  // `redirect: "manual"` turns a login redirect that slipped past the AJAX header into
+  // `opaqueredirect` rather than a cross-origin failure indistinguishable from an outage.
+  return response.status === 401 || response.status === 403 || response.type === "opaqueredirect";
+}
+
+function signInCopy(response: Response): string {
+  return response.status === 403
+    ? "This identity is not authorized. Sign in with an allowed account."
+    : "Your sign-in expired. Sign in again to continue.";
+}
+
+/** Only ever called from an explicit tap: the navigation lets the access proxy renew the session. */
+function reloadToSignIn(): void {
+  location.reload();
+}
+
+/**
+ * One entry for an expired or rejected identity, whether the denial arrived on a directory snapshot
+ * or a launch from the open shell. Closes the browser-owned event stream, drops its liveness and
+ * reconnect timers, and aborts any snapshot still in flight so a buffered keepalive or a later
+ * error cannot replace the sign-in prompt. Transport failures stay on the ordinary recovery path.
+ */
+function enterAuthorizationDenied(message: string): void {
+  authorizationDenied = true;
+  directoryEpoch += 1;
+  snapshotController?.abort();
+  snapshotController = undefined;
+  events?.close();
+  events = undefined;
+  clearEventLiveness();
+  eventStreamStale = false;
+  clearReconnectTimeout();
+  if (activeCollabShell !== undefined) showSignInInShell(activeCollabShell, message);
+  else showSignInRequired(message);
+}
+
+/** Stops automatic retries: only a user-initiated navigation can renew access. */
+function showSignInRequired(message: string): void {
+  authorizationDenied = true;
+  clearReconnectTimeout();
+  setStatus("unauthorized", message);
+  const actions = document.createElement("span");
+  actions.className = "status-actions";
+  const signIn = document.createElement("button");
+  signIn.type = "button";
+  signIn.className = "status-action";
+  signIn.textContent = "Sign in again";
+  signIn.addEventListener("click", reloadToSignIn);
+  actions.append(signIn);
+  statusBanner.append(actions);
 }
 
 function parseDirectoryHistoryState(value: unknown): DirectoryHistoryState | undefined {
@@ -801,6 +890,63 @@ function readDismissedSessions(): Map<string, DismissedSession> {
   return records;
 }
 
+function readActiveSelection(): ActiveSelection | undefined {
+  if (typeof localStorage === "undefined") return undefined;
+  try {
+    const serialized = localStorage.getItem(ACTIVE_SELECTION_STORAGE_KEY);
+    if (serialized === null) return undefined;
+    if (serialized.length > MAX_ACTIVE_SELECTION_BYTES) throw new Error("active selection exceeds bound");
+    const record = exactLocalRecord(JSON.parse(serialized), ["version", "instanceId", "generation", "mode"]);
+    if (
+      record === undefined ||
+      record.version !== ACTIVE_SELECTION_VERSION ||
+      typeof record.instanceId !== "string" ||
+      !INSTANCE_ID_PATTERN.test(record.instanceId) ||
+      !Number.isSafeInteger(record.generation) ||
+      (record.generation as number) < 1 ||
+      (record.mode !== "view" && record.mode !== "control")
+    ) {
+      throw new Error("invalid active selection");
+    }
+    return { instanceId: record.instanceId, generation: record.generation as number, mode: record.mode };
+  } catch {
+    clearActiveSelection();
+    return undefined;
+  }
+}
+
+function writeActiveSelection(selection: ActiveSelection): void {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(
+      ACTIVE_SELECTION_STORAGE_KEY,
+      JSON.stringify({
+        version: ACTIVE_SELECTION_VERSION,
+        instanceId: selection.instanceId,
+        generation: selection.generation,
+        mode: selection.mode,
+      }),
+    );
+  } catch {
+    // Resume is optional; storage denial only means a reload lands in the directory.
+  }
+}
+
+function clearActiveSelection(): void {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.removeItem(ACTIVE_SELECTION_STORAGE_KEY);
+  } catch {
+    // Nothing persisted that could be reused.
+  }
+}
+
+/** Forgets the remembered session only when it is exactly this identity, never a newer choice. */
+function forgetActiveSelection(instanceId: string, generation: number): void {
+  const stored = readActiveSelection();
+  if (stored?.instanceId === instanceId && stored.generation === generation) clearActiveSelection();
+}
+
 function setBoundedLocalRecord<RecordType>(map: Map<string, RecordType>, key: string, record: RecordType): void {
   map.delete(key);
   map.set(key, record);
@@ -898,6 +1044,42 @@ function modelSlug(model: string): string {
   return separator >= 0 && separator + 1 < model.length ? model.slice(separator + 1) : model;
 }
 
+function isAvailable(session: SessionMetadata): boolean {
+  return session.available !== false;
+}
+
+/**
+ * One tap opens Control whenever the session offers it; View is the primary action only for a
+ * standalone session that cannot be controlled. An unavailable fleet row has no action at all.
+ */
+function primaryMode(session: SessionMetadata): LaunchMode | undefined {
+  if (!isAvailable(session)) return undefined;
+  if (session.canControl) return "control";
+  return session.canView ? "view" : undefined;
+}
+
+function onHost(session: SessionMetadata): string {
+  return session.host === undefined ? "" : ` on ${session.host}`;
+}
+
+function unavailableCopy(session: SessionMetadata): string {
+  if (session.hostStatus === "never") return "Machine never reached";
+  return isAvailable(session) ? "Control unavailable" : "Machine unreachable";
+}
+
+function rowActionLabel(session: SessionMetadata, mode: LaunchMode | undefined, controlVerb: string): string {
+  const title = sessionTitle(session);
+  if (mode === "control") return `${controlVerb} ${title}${onHost(session)}`;
+  if (mode === "view") return `View ${title}${onHost(session)}`;
+  return `${title}${onHost(session)} — ${unavailableCopy(session)}`;
+}
+
+/** Machine first, then how long it has waited — or why nothing can be opened there. */
+function queueRowDetail(session: SessionMetadata): string {
+  const state = isAvailable(session) ? waitingLabel(session) : unavailableCopy(session);
+  return session.host === undefined ? state : `${session.host} · ${state}`;
+}
+
 function compareWaiting(left: SessionMetadata, right: SessionMetadata): number {
   const leftSince = left.ask?.since ?? left.lastSeenAt;
   const rightSince = right.ask?.since ?? right.lastSeenAt;
@@ -907,7 +1089,10 @@ function compareWaiting(left: SessionMetadata, right: SessionMetadata): number {
 }
 
 function orderedWaitingSessions(): SessionMetadata[] {
-  return [...sessions.values()].filter(session => session.inputRequired && !isHeld(session)).sort(compareWaiting);
+  // A question on an unreachable machine stays visible but never takes the hero over an actionable one.
+  return [...sessions.values()]
+    .filter(session => session.inputRequired && !isHeld(session))
+    .sort((left, right) => Number(!isAvailable(left)) - Number(!isAvailable(right)) || compareWaiting(left, right));
 }
 
 function orderedHeldSessions(): SessionMetadata[] {
@@ -944,9 +1129,10 @@ function createQueueKicker(label: string, detail?: string): HTMLElement {
 }
 
 function createSessionSummary(session: SessionMetadata): HTMLElement {
-  const values = [session.cwdLabel, session.model].filter(
+  const values = [session.host, session.cwdLabel, session.model].filter(
     (value): value is string => value !== undefined && value.length > 0,
   );
+  if (!isAvailable(session)) values.push(unavailableCopy(session));
   return createTextElement("p", "session-summary", values.join(" · ") || "Live OMP session");
 }
 
@@ -1066,15 +1252,21 @@ function createWorkingRow(session: SessionMetadata): HTMLElement {
   button.type = "button";
   button.className = "working-row";
   button.dataset.instanceId = session.instanceId;
-  button.disabled = !session.canView;
-  button.setAttribute("aria-label", `View ${sessionTitle(session)}`);
+  const mode = primaryMode(session);
+  button.disabled = mode === undefined;
+  button.setAttribute("aria-label", rowActionLabel(session, mode, "Control"));
   const copy = document.createElement("span");
   copy.className = "working-copy";
   const details = document.createElement("span");
   details.className = "working-details";
+  details.append(createTextElement("span", "row-time", uptimeLabel(session)));
+  if (session.host !== undefined) {
+    details.append(createTextElement("span", "row-host", `· ${session.host}`));
+  }
   details.append(
-    createTextElement("span", "row-time", uptimeLabel(session)),
-    createTextElement("span", "session-activity", session.busy === true ? "· Working" : session.busy === false ? "· Idle" : "· Activity unknown"),
+    isAvailable(session)
+      ? createTextElement("span", "session-activity", session.busy === true ? "· Working" : session.busy === false ? "· Idle" : "· Activity unknown")
+      : createTextElement("span", "session-activity row-unavailable", `· ${unavailableCopy(session)}`),
   );
   if (session.cwdLabel) {
     details.append(createTextElement("span", "working-context", `· ${session.cwdLabel}`));
@@ -1083,8 +1275,10 @@ function createWorkingRow(session: SessionMetadata): HTMLElement {
     details.append(createTextElement("span", "working-model", `· ${modelSlug(session.model)}`));
   }
   copy.append(createTextElement("span", "row-title", sessionTitle(session)), details);
-  button.append(createTextElement("span", "row-dot row-dot-live", ""), copy);
-  button.addEventListener("click", () => void launch(session, "view", button));
+  button.append(createTextElement("span", isAvailable(session) ? "row-dot row-dot-live" : "row-dot row-dot-unavailable", ""), copy);
+  button.addEventListener("click", () => {
+    if (mode !== undefined) void launch(session, mode, button);
+  });
 
   const dismiss = document.createElement("button");
   dismiss.type = "button";
@@ -1098,30 +1292,27 @@ function createWorkingRow(session: SessionMetadata): HTMLElement {
 }
 
 function createWaitingRow(session: SessionMetadata): HTMLButtonElement {
-  const mode: LaunchMode = session.canControl ? "control" : "view";
+  const mode = primaryMode(session);
   const button = document.createElement("button");
   button.type = "button";
   button.className = "queue-row";
   button.dataset.instanceId = session.instanceId;
-  button.disabled = mode === "control" ? !session.canControl : !session.canView;
-  button.setAttribute(
-    "aria-label",
-    session.canControl ? `Open request in ${sessionTitle(session)}` : `View ${sessionTitle(session)}`,
-  );
+  button.disabled = mode === undefined;
+  button.setAttribute("aria-label", rowActionLabel(session, mode, "Open request in"));
   button.append(
     createTextElement("span", "row-dot row-dot-waiting", ""),
     createTextElement("span", "row-title", sessionTitle(session)),
-    createTextElement("span", "row-time", waitingLabel(session)),
+    createTextElement("span", "row-time", queueRowDetail(session)),
     createTextElement("span", "row-chevron", "›"),
   );
-  button.addEventListener("click", () =>
-    void launch(session, mode, button, session.ask?.requestId),
-  );
+  button.addEventListener("click", () => {
+    if (mode !== undefined) void launch(session, mode, button, mode === "control" ? session.ask?.requestId : undefined);
+  });
   return button;
 }
 
 function createHeldRow(session: SessionMetadata): HTMLElement {
-  const mode: LaunchMode = session.canControl ? "control" : "view";
+  const mode = primaryMode(session);
   const row = document.createElement("div");
   row.className = "held-row";
   row.dataset.instanceId = session.instanceId;
@@ -1129,16 +1320,16 @@ function createHeldRow(session: SessionMetadata): HTMLElement {
   const open = document.createElement("button");
   open.type = "button";
   open.className = "held-open";
-  open.disabled = mode === "control" ? !session.canControl : !session.canView;
-  open.setAttribute("aria-label", `Open held request in ${sessionTitle(session)}`);
+  open.disabled = mode === undefined;
+  open.setAttribute("aria-label", rowActionLabel(session, mode, "Open held request in"));
   open.append(
     createTextElement("span", "row-dot row-dot-held", ""),
     createTextElement("span", "row-title", sessionTitle(session)),
-    createTextElement("span", "row-time", waitingLabel(session)),
+    createTextElement("span", "row-time", queueRowDetail(session)),
   );
-  open.addEventListener("click", () =>
-    void launch(session, mode, open, session.ask?.requestId),
-  );
+  open.addEventListener("click", () => {
+    if (mode !== undefined) void launch(session, mode, open, mode === "control" ? session.ask?.requestId : undefined);
+  });
 
   const requeue = document.createElement("button");
   requeue.type = "button";
@@ -1161,6 +1352,58 @@ function appendDismissedControl(dismissed: readonly SessionMetadata[]): void {
   restore.addEventListener("click", restoreDismissedSessions);
   control.append(restore);
   sessionList.append(control);
+}
+
+/**
+ * Every federated machine, including one with no session and one never reached, so an empty or
+ * stale machine reads as such instead of silently vanishing from the directory.
+ */
+const FLEET_DIRECTORY_UNAVAILABLE = "Fleet directory unavailable. Machine status may be incomplete.";
+
+/** A bridge that has never answered is not a healthy empty fleet, even when no host row exists yet. */
+function showFleetDirectoryUnavailable(): void {
+  if (fleetStatus !== "unreachable" || statusBanner.dataset.kind === "unauthorized") return;
+  setStatus("gateway", FLEET_DIRECTORY_UNAVAILABLE);
+}
+
+function appendHostSummary(): void {
+  if (fleetStatus === "unreachable" && (hosts === undefined || hosts.length === 0)) {
+    const section = document.createElement("section");
+    section.className = "host-summary";
+    section.dataset.fleetStatus = "unreachable";
+    section.setAttribute("aria-label", "Machines");
+    section.append(createTextElement("p", "host-unavailable", FLEET_DIRECTORY_UNAVAILABLE));
+    sessionList.append(section);
+  }
+  if (hosts === undefined || hosts.length === 0) return;
+  const section = document.createElement("section");
+  section.className = "host-summary";
+  section.setAttribute("aria-label", "Machines");
+  section.append(createQueueKicker(`Machines · ${hosts.length}`));
+  const list = document.createElement("ul");
+  list.className = "host-list";
+  for (const host of hosts) {
+    const count = [...sessions.values()].filter(session => session.host === host.host).length;
+    const sessionCount = `${count} ${count === 1 ? "session" : "sessions"}`;
+    const lastSeen = host.ageSeconds === null ? "" : ` · last seen ${elapsedLabel(Date.now() - host.ageSeconds * 1_000)} ago`;
+    const state =
+      host.status === "live"
+        ? `Live · ${sessionCount}`
+        : host.status === "stale"
+          ? `Unreachable${lastSeen} · ${count === 0 ? "no sessions" : `${sessionCount} unavailable`}`
+          : "Never reached";
+    const row = document.createElement("li");
+    row.className = "host-row";
+    row.dataset.status = host.status;
+    row.append(
+      createTextElement("span", `row-dot row-dot-host-${host.status}`, ""),
+      createTextElement("span", "host-name", host.host),
+      createTextElement("span", "host-state", state),
+    );
+    list.append(row);
+  }
+  section.append(list);
+  sessionList.append(section);
 }
 
 function renderAllClear(
@@ -1214,7 +1457,7 @@ function renderWaitingQueue(
     );
     sessionList.append(summary);
   } else {
-    sessionList.append(createQueueKicker("Up next", waitingLabel(hero)));
+    sessionList.append(createQueueKicker("Up next", isAvailable(hero) ? waitingLabel(hero) : unavailableCopy(hero)));
     const article = document.createElement("article");
     article.className = "queue-hero";
     article.dataset.instanceId = hero.instanceId;
@@ -1222,9 +1465,9 @@ function renderWaitingQueue(
       "p",
       "ask-preview",
       hero.ask?.preview === undefined
-        ? hero.canControl
+        ? primaryMode(hero) === "control"
           ? "Waiting for your input"
-          : "Waiting for your input — Control unavailable"
+          : `Waiting for your input — ${unavailableCopy(hero)}`
         : hero.ask.preview,
     );
     if (hero.ask?.optionCount !== undefined) {
@@ -1242,14 +1485,17 @@ function renderWaitingQueue(
       askPreview,
     );
 
+    const heroMode = primaryMode(hero);
     const primary = document.createElement("button");
     primary.type = "button";
     primary.className = "action action-request";
-    primary.textContent = hero.canControl ? "Open request" : "View transcript";
-    primary.disabled = hero.canControl ? false : !hero.canView;
+    primary.textContent =
+      heroMode === "control" ? "Open request" : heroMode === "view" ? "View transcript" : unavailableCopy(hero);
+    primary.disabled = heroMode === undefined;
     primary.addEventListener("click", () => {
-      const mode: LaunchMode = hero.canControl ? "control" : "view";
-      void launch(hero, mode, primary, hero.ask?.requestId);
+      if (heroMode !== undefined) {
+        void launch(hero, heroMode, primary, heroMode === "control" ? hero.ask?.requestId : undefined);
+      }
     });
     article.append(primary);
 
@@ -1261,7 +1507,7 @@ function renderWaitingQueue(
     hold.textContent = "Hold for desk";
     hold.addEventListener("click", () => holdSession(hero));
     alternatives.append(hold);
-    if (hero.canControl && hero.canView) {
+    if (heroMode === "control" && hero.canView) {
       const transcript = document.createElement("button");
       transcript.type = "button";
       transcript.className = "hero-alt";
@@ -1286,6 +1532,7 @@ function renderWaitingQueue(
     for (const session of working) sessionList.append(createWorkingRow(session));
   }
   appendDismissedControl(dismissed);
+  appendHostSummary();
 }
 
 function render(): void {
@@ -1303,6 +1550,7 @@ function render(): void {
     directoryCount.hidden = true;
     sessionList.className = "session-list";
     sessionList.setAttribute("aria-label", "Live OMP sessions");
+    appendHostSummary();
     return;
   }
 
@@ -1332,6 +1580,7 @@ function render(): void {
   sessionList.className = "session-list all-clear";
   sessionList.setAttribute("aria-label", "Live OMP sessions");
   renderAllClear(working, dismissed);
+  appendHostSummary();
 }
 
 function setConnectionState(
@@ -1367,7 +1616,7 @@ function hideTriageBar(shell: ActiveCollabShell, rerenderConnection = true): voi
 
 function showTriageBar(
   shell: ActiveCollabShell,
-  kind: "next" | "clear" | "hold" | "sending" | "reconnecting" | "ended",
+  kind: "next" | "clear" | "hold" | "sending" | "reconnecting" | "ended" | "signin",
   copy: string,
   actionLabel?: string,
   action?: () => void,
@@ -1440,9 +1689,21 @@ function scheduleConnectionRender(shell: ActiveCollabShell, delay: number, kind:
   else shell.connectionTickTimeout = timeout;
 }
 
+/** A sign-in prompt cannot recover without a reload, so connection ticks must not replace it. */
+function signInTriageVisible(shell: ActiveCollabShell): boolean {
+  return shell.triageBar.dataset.kind === "signin" && !shell.triageBar.hidden;
+}
+
+function showSignInInShell(shell: ActiveCollabShell, message: string): void {
+  shell.answerShown = true;
+  clearConnectionTimers(shell);
+  setConnectionState(shell.connectionChip, "offline", "Sign in required");
+  showTriageBar(shell, "signin", message, "Sign in again", reloadToSignIn);
+}
+
 function renderConnectionState(shell: ActiveCollabShell): void {
   const state = shell.latestEmbedState;
-  if (state === undefined || activeCollabShell !== shell) return;
+  if (state === undefined || activeCollabShell !== shell || signInTriageVisible(shell) || authorizationDenied) return;
 
   if (state.phase === "ended") {
     clearConnectionTimers(shell);
@@ -1481,7 +1742,7 @@ function renderConnectionState(shell: ActiveCollabShell): void {
       setConnectionState(shell.connectionChip, "reconnecting", "Reconnecting…");
       if (state.responsePending && !shell.answerTriageVisible) {
         showTriageBar(shell, "sending", "Sending…");
-      } else if (!shell.answerTriageVisible && !shell.triageBar.hidden) {
+      } else if (!shell.answerTriageVisible && !shell.triageBar.hidden && !signInTriageVisible(shell)) {
         hideTriageBar(shell);
       }
       scheduleConnectionRender(shell, CONNECTION_EXTENDED_MS - elapsed, "delay");
@@ -1522,14 +1783,66 @@ function renderConnectionState(shell: ActiveCollabShell): void {
   if (state.responsePending && !shell.answerTriageVisible) {
     showTriageBar(shell, "sending", "Sending…");
   } else {
-    if (shell.triageBar.dataset.kind === "reconnecting" || shell.triageBar.dataset.kind === "sending") {
+    if (
+      (shell.triageBar.dataset.kind === "reconnecting" || shell.triageBar.dataset.kind === "sending") &&
+      !signInTriageVisible(shell)
+    ) {
       hideTriageBar(shell);
     }
     reconcileActiveCollabShell();
   }
 }
+/**
+ * Leaving a session is an explicit choice: it supersedes any launch still in flight and forgets the
+ * session, so a later reload lands in the directory rather than reopening it.
+ */
 function returnToDirectory(historyValue?: unknown): void {
+  selectionSequence += 1;
+  clearActiveSelection();
   void restoreDirectory(historyValue);
+}
+
+/**
+ * Why a remembered selection can no longer be reopened, judged only against fresh metadata: the
+ * exact instance at the exact generation, still reachable, still offering the mode that was open.
+ * A restarted host bumped its generation and ended that session, so its successor is never opened.
+ */
+function resumeRefusal(resume: ActiveSelection, session: SessionMetadata | undefined): string | undefined {
+  if (session === undefined) return "Your last session has ended. Choose a current session.";
+  if (session.generation !== resume.generation) {
+    return "Your last session restarted, so it was not reopened. Choose a current session.";
+  }
+  if (!isAvailable(session)) {
+    return `${session.host ?? "Its machine"} is unreachable, so your last session was not reopened.`;
+  }
+  if (resume.mode === "control" && !session.canControl) return "Control is no longer available for your last session.";
+  if (resume.mode === "view" && !session.canView) return "Viewing is no longer available for your last session.";
+  return undefined;
+}
+
+/** Stays in the directory and says why; never retries on its own. */
+function refuseResume(resume: ActiveSelection, session: SessionMetadata | undefined, message: string): void {
+  // An unreachable machine may return with the same session, so only that refusal keeps the record
+  // for a later reload; every other one is final.
+  const sameButUnreachable = session?.generation === resume.generation && !isAvailable(session);
+  if (!sameButUnreachable) forgetActiveSelection(resume.instanceId, resume.generation);
+  intentStatusLocked = true;
+  setStatus("expired", message);
+  applyActivatedWorkerUpdate();
+}
+
+/** After a full reload: reopen the remembered session only if fresh metadata matches it exactly. */
+async function resolvePendingResume(): Promise<void> {
+  const resume = pendingResume;
+  pendingResume = undefined;
+  if (resume === undefined || activeCollabShell !== undefined) return;
+  const session = sessions.get(resume.instanceId);
+  const refusal = resumeRefusal(resume, session);
+  if (refusal !== undefined || session === undefined) {
+    refuseResume(resume, session, refusal ?? "");
+    return;
+  }
+  await launch(session, resume.mode);
 }
 
 /**
@@ -1573,11 +1886,16 @@ function restoreDirectory(historyValue?: unknown): Promise<boolean> {
  */
 async function resumeDisposedCollabShell(): Promise<void> {
   const resume = disposedShellResume;
+  const selection = selectionSequence;
   const restored = await restoreDirectory();
-  if (resume === undefined || !restored) return;
+  // A tap made while the directory refreshed is newer than the backgrounded session.
+  if (resume === undefined || !restored || selection !== selectionSequence) return;
   const session = sessions.get(resume.instanceId);
-  if (session === undefined || session.generation !== resume.generation) return;
-  if (!(resume.mode === "control" ? session.canControl : session.canView)) return;
+  const refusal = resumeRefusal(resume, session);
+  if (refusal !== undefined || session === undefined) {
+    refuseResume(resume, session, refusal ?? "");
+    return;
+  }
   const requestId = session.ask?.requestId === resume.requestId ? resume.requestId : undefined;
   await launch(session, resume.mode, undefined, requestId);
 }
@@ -1595,18 +1913,20 @@ async function holdCurrentAskAndAdvance(shell: ActiveCollabShell, current: Sessi
   }
 
   const next = orderedWaitingSessions().find(
-    session => session.instanceId !== current.instanceId || session.ask?.requestId !== currentRequestId,
+    session =>
+      primaryMode(session) !== undefined &&
+      (session.instanceId !== current.instanceId || session.ask?.requestId !== currentRequestId),
   );
-  if (next !== undefined) {
+  const mode = next === undefined ? undefined : primaryMode(next);
+  if (next !== undefined && mode !== undefined) {
     shell.answerShown = true;
     showTriageBar(shell, "sending", "Opening next request…");
-    const mode: LaunchMode = next.canControl ? "control" : "view";
     const opened = await launch(next, mode, undefined, next.ask?.requestId);
     if (opened) {
       holdSession(current, false);
       return;
     }
-    if (activeCollabShell !== shell) return;
+    if (activeCollabShell !== shell || signInTriageVisible(shell) || authorizationDenied) return;
     shell.answerShown = false;
     const latestCurrent = sessions.get(current.instanceId);
     if (
@@ -1905,6 +2225,8 @@ function enterCollabClient(
       },
     );
     disposeActiveCollab = dispose;
+    // Metadata only, written after the user's explicit launch mounted: never the capability.
+    writeActiveSelection({ instanceId: session.instanceId, generation: session.generation, mode });
   } catch (error) {
     dispose();
     returnToDirectory();
@@ -1919,6 +2241,10 @@ async function launch(
   requestId?: string,
 ): Promise<boolean> {
   const sourceShell = activeCollabShell;
+  selectionSequence += 1;
+  const selection = selectionSequence;
+  // An explicit choice made after a reload replaces the session remembered from before it.
+  pendingResume = undefined;
   const idleLabel = button?.textContent ?? (mode === "view" ? "View" : "Control");
   if (button !== undefined) {
     button.disabled = true;
@@ -1945,7 +2271,15 @@ async function launch(
   };
   let stylesheet: HTMLLinkElement | undefined;
   let startCollabWithCapability: StartCollabWithCapability;
-  const fail = (kind: "offline" | "unauthorized" | "expired", message: string): boolean => {
+  /** A newer selection owns shared UI, auth, history, and storage. This attempt may only settle itself. */
+  const superseded = (): boolean => {
+    if (selection === selectionSequence) return false;
+    settle();
+    resetButton();
+    return true;
+  };
+  const fail = (kind: "offline" | "expired", message: string): boolean => {
+    if (superseded()) return false;
     settle();
     resetButton();
     if (sourceShell !== undefined && activeCollabShell === sourceShell) {
@@ -1977,15 +2311,17 @@ async function launch(
     stylesheet = loadedStylesheet;
     startCollabWithCapability = collabClient.startCollabWithCapability;
   } catch {
+    if (superseded()) return false;
     fail("offline", "The collaboration client did not start. Try again.");
     return false;
   }
+  if (superseded()) return false;
 
   let response: Response;
   try {
     response = await fetch(`/api/v1/sessions/${encodeURIComponent(session.instanceId)}/launch`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { ...API_REQUEST_HEADERS, "Content-Type": "application/json" },
       body: JSON.stringify({
         mode,
         generation: session.generation,
@@ -1993,19 +2329,31 @@ async function launch(
       }),
       cache: "no-store",
       credentials: "same-origin",
+      redirect: "manual",
     });
   } catch {
+    if (superseded()) return false;
     fail("offline", "Gateway unavailable. Check your tailnet connection and try again.");
     return false;
   }
+  if (superseded()) return false;
 
+  if (isSignInRequired(response)) {
+    // Never retried automatically: renewing access needs the user to navigate through sign-in.
+    const message = signInCopy(response);
+    settle();
+    resetButton();
+    if (activeCollabShell === undefined && location.pathname === "/client/") history.replaceState(null, "", "/");
+    enterAuthorizationDenied(message);
+    applyActivatedWorkerUpdate();
+    return false;
+  }
   if (!response.ok) {
-    if (response.status === 403) {
-      authorizationDenied = true;
-      fail("unauthorized", "This tailnet identity is not authorized.");
-    } else if (response.status === 404 || response.status === 409) {
+    if (response.status === 404 || response.status === 409) {
+      // The exact identity is gone or changed; a reload must not try to reopen it again.
+      if (requestId === undefined) forgetActiveSelection(session.instanceId, session.generation);
       const preservedShell = fail("expired", "That session changed or expired. Try again.");
-      if (!preservedShell && await refreshAndConnect()) {
+      if (!preservedShell && await refreshAndConnect() && selection === selectionSequence) {
         setStatus("expired", "That session changed or expired. The list has been refreshed.");
       }
     } else {
@@ -2020,6 +2368,11 @@ async function launch(
     if (payload.mode !== mode || payload.generation !== session.generation) {
       throw new Error("invalid launch response");
     }
+    if (superseded()) {
+      // The user chose something else, or left, while this launch was in flight. Drop its
+      // capability unused rather than mount over the newer choice.
+      return false;
+    }
     capability = payload.capability;
     settle();
     enterCollabClient(capability, startCollabWithCapability, session, mode, requestId);
@@ -2027,6 +2380,7 @@ async function launch(
     return true;
   } catch {
     capability = undefined;
+    if (superseded()) return false;
     fail("offline", "The gateway returned an invalid launch response.");
     return false;
   }
@@ -2039,6 +2393,10 @@ function applyEvent(event: SessionEvent, epoch: number): boolean {
   directoryLoaded = true;
   lastFreshAt = Date.now();
   if (event.type === "snapshot") {
+    // A fleet snapshot replaces sessions and machines together, including one sent mid-stream
+    // because only a machine's reachability changed.
+    hosts = event.hosts;
+    fleetStatus = event.fleetStatus;
     replaceSessionSnapshot(event.sessions);
   } else if (event.type === "session_upsert") {
     sessions.set(event.session.instanceId, event.session);
@@ -2048,6 +2406,7 @@ function applyEvent(event: SessionEvent, epoch: number): boolean {
   }
   if (event.type !== "snapshot") reconcileLocalRecords();
   render();
+  if (!intentStatusLocked) showFleetDirectoryUnavailable();
   reconcileActiveCollabShell();
   return true;
 }
@@ -2068,18 +2427,23 @@ async function loadSnapshot(epoch: number): Promise<boolean> {
   if (!directoryLoaded) setStatus("loading", "Loading sessions…");
   try {
     const response = await fetch("/api/v1/sessions", {
+      headers: API_REQUEST_HEADERS,
       cache: "no-store",
       credentials: "same-origin",
+      redirect: "manual",
       signal: controller.signal,
     });
     responseReceived = true;
     if (epoch !== directoryEpoch) return false;
-    if (response.status === 403) {
-      authorizationDenied = true;
+    // Also the probe behind every directory-stream failure: a native EventSource cannot send the
+    // AJAX header, so an expired sign-in is recognized here and stops the retry chain.
+    if (isSignInRequired(response)) {
       directoryLoaded = false;
       sessions.clear();
+      hosts = undefined;
+      fleetStatus = undefined;
       render();
-      setStatus("unauthorized", "This tailnet identity is not authorized.");
+      enterAuthorizationDenied(signInCopy(response));
       return false;
     }
     if (!response.ok) throw new Error("snapshot failed");
@@ -2089,9 +2453,12 @@ async function loadSnapshot(epoch: number): Promise<boolean> {
     authorizationDenied = false;
     directoryLoaded = true;
     lastFreshAt = Date.now();
+    hosts = payload.hosts;
+    fleetStatus = payload.fleetStatus;
     replaceSessionSnapshot(payload.sessions);
     render();
     setStatus("ready", "");
+    showFleetDirectoryUnavailable();
     return true;
   } catch {
     if (epoch !== directoryEpoch || (controller.signal.aborted && !timedOut)) return false;
@@ -2129,7 +2496,7 @@ function connectEvents(epoch: number): void {
       }
       armEventLiveness(source, epoch);
       try {
-        if (applyEvent(parseSessionEvent(JSON.parse(event.data)), epoch) && !notificationRouteStatusLocked) {
+        if (applyEvent(parseSessionEvent(JSON.parse(event.data)), epoch) && !intentStatusLocked && fleetStatus !== "unreachable") {
           setStatus("ready", "");
         }
       } catch {
@@ -2145,7 +2512,7 @@ function connectEvents(epoch: number): void {
     }
     lastFreshAt = Date.now();
     armEventLiveness(source, epoch);
-    if (!notificationRouteStatusLocked) setStatus("ready", "");
+    if (!intentStatusLocked && !authorizationDenied && fleetStatus !== "unreachable") setStatus("ready", "");
   });
   source.onerror = () => {
     // Native EventSource reconnects on network restoration even when Android Chrome loses a
@@ -2169,15 +2536,18 @@ async function resolvePendingNotificationRoute(): Promise<void> {
     session !== undefined &&
     shell.instanceId === session.instanceId &&
     shell.generation === session.generation;
-  if (pending?.kind === "activity_stop" && session?.generation === pending.generation && session.canView) {
+  const stopMode: LaunchMode | undefined =
+    session === undefined || !isAvailable(session) ? undefined : session.canView ? "view" : primaryMode(session);
+  if (pending?.kind === "activity_stop" && session?.generation === pending.generation && stopMode !== undefined) {
     if (shown) return;
-    if (shell !== undefined) showTriageBar(shell, "sending", "Opening view…");
-    await launch(session, "view");
+    if (shell !== undefined) showTriageBar(shell, "sending", stopMode === "view" ? "Opening view…" : "Opening control…");
+    await launch(session, stopMode);
   } else if (
     pending?.kind === "attention" &&
     session?.ask?.requestId === pending.requestId &&
     session.inputRequired &&
-    session.canControl
+    session.canControl &&
+    isAvailable(session)
   ) {
     if (shown && shell.mode === "control") return;
     if (shell !== undefined) showTriageBar(shell, "sending", "Opening control…");
@@ -2193,6 +2563,7 @@ async function resolvePendingNotificationRoute(): Promise<void> {
 }
 
 async function refreshAndConnect(resetBackoff = true): Promise<boolean> {
+  if (authorizationDenied) return false;
   if (resetBackoff) reconnectAttempt = 0;
   clearReconnectTimeout();
   const epoch = directoryEpoch + 1;
@@ -2210,6 +2581,7 @@ async function refreshAndConnect(resetBackoff = true): Promise<boolean> {
     connectEvents(epoch);
     warmCollabClient();
     await resolvePendingNotificationRoute();
+    await resolvePendingResume();
     return true;
   }
   if (!authorizationDenied && epoch === directoryEpoch) scheduleReconnect();
@@ -2245,6 +2617,7 @@ window.addEventListener("pageshow", event => {
 });
 window.addEventListener("online", () => void refreshAndConnect());
 window.addEventListener("offline", () => {
+  if (authorizationDenied) return;
   directoryEpoch += 1;
   directoryRevision = -1;
   snapshotController?.abort();

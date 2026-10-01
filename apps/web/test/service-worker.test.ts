@@ -21,6 +21,7 @@ const cacheAdds: string[][] = [];
 const cacheDeletes: string[] = [];
 const cachePuts: string[] = [];
 const fetched: string[] = [];
+let nextFetchResponse: (() => Response) | undefined;
 const cache = {
   async addAll(paths: readonly string[]): Promise<void> {
     cacheAdds.push([...paths]);
@@ -128,7 +129,9 @@ Object.defineProperties(globalThis, {
     configurable: true,
     async value(request: { url: string }): Promise<Response> {
       fetched.push(request.url);
-      return new Response("asset", { status: 200 });
+      const respond = nextFetchResponse;
+      nextFetchResponse = undefined;
+      return respond?.() ?? new Response("asset", { status: 200 });
     },
   },
   skipWaiting: {
@@ -720,5 +723,23 @@ describe("notification service worker", () => {
     expect(await shellResponse).toBeInstanceOf(Response);
     expect(fetched).toEqual([shellRequest.url]);
     expect(cachePuts).toEqual([shellRequest.url]);
+  });
+
+  test("never caches a shell asset answered through an access-proxy redirect", async () => {
+    cachePuts.length = 0;
+    nextFetchResponse = () => {
+      const login = new Response("<html>sign in</html>", { status: 200 });
+      Object.defineProperty(login, "redirected", { value: true });
+      return login;
+    };
+    const shellRequest = {
+      method: "GET",
+      mode: "same-origin",
+      url: "https://sessions.example/assets/app.0123456789ab.js",
+    };
+    let shellResponse: Promise<Response> | undefined;
+    listener("fetch")({ request: shellRequest, respondWith(promise: Promise<Response>): void { shellResponse = promise; } });
+    expect((await shellResponse)?.redirected).toBeTrue();
+    expect(cachePuts).toEqual([]);
   });
 });

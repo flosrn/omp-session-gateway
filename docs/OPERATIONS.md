@@ -190,6 +190,45 @@ absent from discovery is removed. An absent discovery directory is valid when no
 Validate strictly and fail closed. Reject wildcard listen addresses in production, wildcard
 identities, unsafe paths, unknown fields, and invalid poll/TTL combinations.
 
+### Private flosrn fleet deployment
+
+Use this fork's `cloudflare-access` mode only for the managed fleet variant. Never route the
+Cloudflare Tunnel into `tailscale-serve`; all Serve rules below remain unchanged for that mode.
+The listener remains `127.0.0.1`, with `http.publicOrigin = "https://omp.shipmate.bot"`.
+
+| Field | Requirement |
+|---|---|
+| `auth.mode` | `cloudflare-access` |
+| `auth.allowedLogins` | Exact normalized human email allowlist, no wildcards |
+| `auth.cloudflareAccess.teamDomain` | Exact `https://<team>.cloudflareaccess.com` origin; no port, path, credentials, query or fragment |
+| `auth.cloudflareAccess.audience` | Access application's 64-character lowercase hex AUD tag |
+| `federation.socketPath` | Canonical absolute path to the private gateway-only Unix socket, at most 103 UTF-8 bytes |
+| `federation.tokenFile` | Canonical absolute path to this process user's owner-only regular bearer-token file |
+| `federation.pollSeconds` | Integer 1–30 seconds; managed fleet uses 3 |
+
+`auth.cloudflareAccess` is required in Access mode and rejected in other modes. Federation is
+optional; without it standalone discovery remains unchanged. The client rereads its private token
+on every bridge request. Rotate its bearer together with the Hub's hash and restart the Hub after
+the hash environment changes. Do not reuse the operator token. Asset requests also require Access
+auth; rejected API requests offer sign-in rather than an endless retry loop.
+
+HarnessOS manages the fleet source pin in `components/omp-session-gateway/gateway.toml`, an
+immutable release per full fork commit, `harnessos-omp-session-gateway.service`, and the dedicated
+`cloudflared-omp-sessions.service`. The connector uses its own config, token and loopback metrics
+endpoint; it does not modify the gapila-edge connector or `/etc/cloudflared/config.yml`.
+Phase declarations in HarnessOS `secrets.toml` supply the separate bridge bearer, its Hub-side
+SHA-256 hash, and the tunnel token; none belongs in Gateway config or Git. Preview the gapicore
+plan, render secrets to their private declared paths, then apply explicitly and verify readiness,
+positive/negative Access identity, expired SSE, exact-generation launch/resume and forbidden sinks.
+Process-account separation and the private gateway-only socket must be verified before deployment;
+a bearer guard on the Hub's shared privileged socket is insufficient.
+
+Access revocation does not kill an existing OMP collaboration connection. See the
+[revocation limit](SECURITY.md#private-flosrn-access-and-fleet-boundary). Local Chrome viewport
+timings are [Tested evidence](COMPATIBILITY.md#private-flosrn-fork-evidence), not production or
+iPhone qualification. Browser suspension is handled by reconnect/relaunch, not continuous execution.
+
+
 ## 5. Tailscale Serve
 
 After the gateway service is healthy on loopback, configure a persistent private HTTPS proxy. Ask the

@@ -475,4 +475,30 @@ describe("SessionRegistry", () => {
     expect(registry.authorizeLaunch("registry-instance-0002", 1, "control").status).toBe("missing");
     expect(errors).toHaveLength(2);
   });
+
+  test("fleet status spends a revision only when it changes and stays off a standalone snapshot", () => {
+    const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10, clock: new FakeClock() });
+    expect(registry.snapshot()).not.toHaveProperty("fleetStatus");
+    const events: SessionEvent[] = [];
+    registry.subscribe(event => events.push(event));
+    registry.setFleetStatus("unreachable");
+    registry.setFleetStatus("unreachable");
+    expect(registry.revision).toBe(1);
+    expect(registry.snapshot()).toMatchObject({ revision: 1, sessions: [], fleetStatus: "unreachable" });
+    expect(registry.snapshot()).not.toHaveProperty("hosts");
+    registry.setHosts([], "unreachable");
+    expect(registry.revision).toBe(2);
+    registry.setHosts([], "unreachable");
+    expect(registry.revision).toBe(2);
+    registry.setHosts([], "ok");
+    expect(registry.revision).toBe(3);
+    expect(events.map(event => event.type === "snapshot" ? event.fleetStatus : undefined)).toEqual([
+      "unreachable",
+      "unreachable",
+      "ok",
+    ]);
+    const admitted: SessionEvent[] = [];
+    registry.subscribeWithSnapshot(event => admitted.push(event));
+    expect(admitted[0]).toMatchObject({ type: "snapshot", fleetStatus: "ok", hosts: [] });
+  });
 });

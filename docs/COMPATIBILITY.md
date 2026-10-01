@@ -1,5 +1,23 @@
 # Compatibility and support policy
 
+## Private flosrn fork evidence
+
+The Cloudflare Access/HarnessOS fleet variant in this fork is separate from the upstream release
+matrix below. Upstream Tailscale and physical-device qualification does not qualify this variant.
+The intended always-on host is gapicore and origin is `https://omp.shipmate.bot`; a declared unit,
+tunnel, source pin or secret render is not proof of deployment readiness.
+
+**Tested — local Chrome mobile-viewport smoke:** the directory showed 10 live Mac sessions,
+one gapicore session and one netcup-vie session. Directory load was 162 ms; gapicore Control's
+composer became ready in 4,678 ms; reload resumed that same session in 4,877 ms. The saved
+selection contained only `version`, `instanceId`, `generation`, `mode`; explicit Back removed it.
+The smoke reported `capabilityInStorageOrDom=false` and `errors=[]`.
+
+These are individual local observations, not latency guarantees or a release qualification.
+They do not prove actual iPhone/Safari, Home Screen, background Web Push, production Access,
+tunnel readiness, Hako coexistence or direct/proxy reachability. No real iPhone or live Web Push
+proof is claimed for this variant.
+
 ## Platforms and browsers
 
 Use OMP Session Gateway from a modern browser, and install it as a PWA where the platform supports

@@ -1,10 +1,19 @@
 import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, normalize } from "node:path";
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { isCloudflareAccessAudience, isCloudflareAccessTeamDomain, type CloudflareAccessSettings } from "./access.ts";
 import { resolveOmpDiscoveryDirectory } from "./omp-registry.ts";
 
-export type AuthMode = "tailscale-serve" | "dev-localhost";
+export type AuthMode = "tailscale-serve" | "dev-localhost" | "cloudflare-access";
+
+/** Harness fleet directory bridge: a private Unix socket plus a private bearer-token file. */
+export interface FederationConfig {
+  readonly socketPath: string;
+  readonly tokenFile: string;
+  /** Seconds between fleet directory polls, 1 to 30. */
+  readonly pollSeconds: number;
+}
 
 export interface GatewayConfig {
   readonly http: {
@@ -26,6 +35,8 @@ export interface GatewayConfig {
      * bypass in #98, so `doctor` reports it as a finding.
      */
     readonly trustIdentityWithoutTailnetDevice?: boolean;
+    /** Required exactly when `mode` is `cloudflare-access`; absent otherwise. */
+    readonly cloudflareAccess?: CloudflareAccessSettings;
   };
   readonly registry: {
     /** Seconds between discovery polls of OMP's collaboration host directory. */
@@ -41,6 +52,8 @@ export interface GatewayConfig {
     /** Per-host query budget for one `snapshot` or `link` round trip. */
     readonly queryTimeoutMs: number;
   };
+  /** Present only when this gateway lists a Harness fleet instead of standalone discovery. */
+  readonly federation?: FederationConfig;
   readonly paths: {
     readonly configDir: string;
     readonly stateDir: string;
@@ -495,11 +508,60 @@ function requireDiscoveryDir(value: unknown): string | undefined {
   return value;
 }
 
+function parseCloudflareAccess(value: unknown): CloudflareAccessSettings {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("auth.cloudflareAccess must be an object");
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!["teamDomain", "audience"].includes(key)) throw new Error(`unknown auth.cloudflareAccess key: ${key}`);
+  }
+  if (!isCloudflareAccessTeamDomain(record.teamDomain)) {
+    throw new Error("auth.cloudflareAccess.teamDomain must be an exact https://<team>.cloudflareaccess.com origin");
+  }
+  if (!isCloudflareAccessAudience(record.audience)) {
+    throw new Error("auth.cloudflareAccess.audience must be a 64-character lowercase hex AUD tag");
+  }
+  return { teamDomain: record.teamDomain, audience: record.audience };
+}
+
+/** Absolute, already-normalized, NUL-free: a path that names exactly one place regardless of cwd. */
+function requireCanonicalAbsolutePath(value: unknown, label: string): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 1_024 ||
+    value.includes("\0") ||
+    !isAbsolute(value) ||
+    normalize(value) !== value
+  ) {
+    throw new Error(`${label} must be a normalized absolute path`);
+  }
+  return value;
+}
+
+function parseFederation(value: unknown): FederationConfig {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("federation must be an object");
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!["socketPath", "tokenFile", "pollSeconds"].includes(key)) throw new Error(`unknown federation config key: ${key}`);
+  }
+  const socketPath = requireCanonicalAbsolutePath(record.socketPath, "federation.socketPath");
+  // `sun_path` holds 104 bytes on macOS and 108 on Linux, including the terminator.
+  if (Buffer.byteLength(socketPath) > 103) throw new Error("federation.socketPath exceeds the Unix socket path limit");
+  return {
+    socketPath,
+    tokenFile: requireCanonicalAbsolutePath(record.tokenFile, "federation.tokenFile"),
+    pollSeconds: validateBoundedInteger(record.pollSeconds, 1, 30, "federation.pollSeconds"),
+  };
+}
+
+
 function parseConfigObject(raw: unknown, defaults: GatewayConfig): GatewayConfig {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error("config must be an object");
   const record = raw as Record<string, unknown>;
   for (const key of Object.keys(record)) {
-    if (!["http", "auth", "registry", "omp"].includes(key)) throw new Error(`unknown config key: ${key}`);
+    if (!["http", "auth", "registry", "omp", "federation"].includes(key)) throw new Error(`unknown config key: ${key}`);
   }
   const http = (record.http ?? {}) as Record<string, unknown>;
   const auth = (record.auth ?? {}) as Record<string, unknown>;
@@ -512,7 +574,7 @@ function parseConfigObject(raw: unknown, defaults: GatewayConfig): GatewayConfig
     if (!["hostname", "port", "publicOrigin"].includes(key)) throw new Error(`unknown http config key: ${key}`);
   }
   for (const key of Object.keys(auth)) {
-    if (!["mode", "allowedLogins", "trustIdentityWithoutTailnetDevice"].includes(key)) {
+    if (!["mode", "allowedLogins", "trustIdentityWithoutTailnetDevice", "cloudflareAccess"].includes(key)) {
       throw new Error(`unknown auth config key: ${key}`);
     }
   }
@@ -537,9 +599,14 @@ function parseConfigObject(raw: unknown, defaults: GatewayConfig): GatewayConfig
     throw new Error("http.publicOrigin must be an exact HTTP(S) origin");
   }
   const mode = auth.mode ?? defaults.auth.mode;
-  if (mode !== "tailscale-serve" && mode !== "dev-localhost") throw new Error("invalid auth.mode");
+  if (mode !== "tailscale-serve" && mode !== "dev-localhost" && mode !== "cloudflare-access") {
+    throw new Error("invalid auth.mode");
+  }
   if (mode === "tailscale-serve" && publicOrigin.protocol !== "https:") {
     throw new Error("tailscale-serve mode requires an exact HTTPS public origin");
+  }
+  if (mode === "cloudflare-access" && publicOrigin.protocol !== "https:") {
+    throw new Error("cloudflare-access mode requires an exact HTTPS public origin");
   }
   if (mode === "dev-localhost" && publicOrigin.origin !== loopbackHttpOrigin(hostname, port)) {
     throw new Error("dev-localhost mode requires the configured loopback HTTP origin");
@@ -552,10 +619,23 @@ function parseConfigObject(raw: unknown, defaults: GatewayConfig): GatewayConfig
   if (mode === "tailscale-serve" && allowedLogins.length === 0) {
     throw new Error("tailscale-serve mode requires at least one allowed login");
   }
+  if (mode === "cloudflare-access" && allowedLogins.length === 0) {
+    throw new Error("cloudflare-access mode requires at least one allowed login");
+  }
   const declaredTrust = auth.trustIdentityWithoutTailnetDevice ?? false;
   if (typeof declaredTrust !== "boolean") {
     throw new Error("auth.trustIdentityWithoutTailnetDevice must be a boolean");
   }
+  // Access settings and Access mode come together: settings under another mode would be a key the
+  // daemon silently ignores, and Access mode without them has nothing to verify against.
+  if (mode !== "cloudflare-access" && auth.cloudflareAccess !== undefined) {
+    throw new Error("auth.cloudflareAccess requires auth.mode cloudflare-access");
+  }
+  if (mode === "cloudflare-access" && auth.cloudflareAccess === undefined) {
+    throw new Error("cloudflare-access mode requires auth.cloudflareAccess");
+  }
+  const cloudflareAccess = auth.cloudflareAccess === undefined ? undefined : parseCloudflareAccess(auth.cloudflareAccess);
+  const federation = record.federation === undefined ? undefined : parseFederation(record.federation);
   const heartbeatSeconds = validateBoundedInteger(
     registry.heartbeatSeconds ?? defaults.registry.heartbeatSeconds,
     MIN_HEARTBEAT_SECONDS,
@@ -569,11 +649,21 @@ function parseConfigObject(raw: unknown, defaults: GatewayConfig): GatewayConfig
     "registry.ttlSeconds",
   );
   if (ttlSeconds <= heartbeatSeconds * 2) throw new Error("registry.ttlSeconds must exceed two heartbeat intervals");
+  // A failed fleet poll does not refresh card liveness, so the next poll must still land inside the
+  // TTL. The same rule the heartbeat already has: one missed interval cannot retire a live card.
+  if (federation !== undefined && ttlSeconds <= federation.pollSeconds * 2) {
+    throw new Error("registry.ttlSeconds must exceed two federation poll intervals");
+  }
   return {
     http: { hostname, port, publicOrigin: publicOrigin.origin },
     // Written only when asserted, so an ordinary config keeps the shape it had before this field
     // existed and the safe reading is the absent one.
-    auth: { mode, allowedLogins, ...(declaredTrust ? { trustIdentityWithoutTailnetDevice: true } : {}) },
+    auth: {
+      mode,
+      allowedLogins,
+      ...(declaredTrust ? { trustIdentityWithoutTailnetDevice: true } : {}),
+      ...(cloudflareAccess === undefined ? {} : { cloudflareAccess }),
+    },
     registry: {
       heartbeatSeconds,
       ttlSeconds,
@@ -596,6 +686,7 @@ function parseConfigObject(raw: unknown, defaults: GatewayConfig): GatewayConfig
         "omp.queryTimeoutMs",
       ),
     },
+    ...(federation === undefined ? {} : { federation }),
     paths: defaults.paths,
   };
 }
@@ -632,18 +723,26 @@ export async function loadGatewayConfig(overrides: ConfigOverrides = {}): Promis
       : config.http.publicOrigin);
   const publicOrigin = new URL(publicOriginValue);
   if (publicOrigin.origin !== publicOriginValue) throw new Error("http.publicOrigin must be an exact URL origin");
-  if (mode === "tailscale-serve" && publicOrigin.protocol !== "https:") {
-    throw new Error("tailscale-serve mode requires an exact HTTPS public origin");
+  if ((mode === "tailscale-serve" || mode === "cloudflare-access") && publicOrigin.protocol !== "https:") {
+    throw new Error(`${mode} mode requires an exact HTTPS public origin`);
   }
   if (mode === "dev-localhost" && publicOrigin.origin !== loopbackHttpOrigin(config.http.hostname, port)) {
     throw new Error("dev-localhost mode requires the configured loopback HTTP origin");
   }
-  if (mode === "tailscale-serve" && config.auth.allowedLogins.length === 0) {
-    throw new Error("tailscale-serve mode requires at least one allowed login");
+  if ((mode === "tailscale-serve" || mode === "cloudflare-access") && config.auth.allowedLogins.length === 0) {
+    throw new Error(`${mode} mode requires at least one allowed login`);
   }
+  if (mode === "cloudflare-access" && config.auth.cloudflareAccess === undefined) {
+    throw new Error("cloudflare-access mode requires auth.cloudflareAccess");
+  }
+  // A mode override (only ever `dev-localhost`) leaves no Access settings for a daemon not using them.
+  const { cloudflareAccess, ...authWithoutAccess } = config.auth;
   return {
     ...config,
-    auth: { ...config.auth, mode },
+    auth:
+      mode === "cloudflare-access" && cloudflareAccess !== undefined
+        ? { ...authWithoutAccess, mode, cloudflareAccess }
+        : { ...authWithoutAccess, mode },
     http: {
       ...config.http,
       port,
@@ -733,6 +832,8 @@ export async function writeGatewayConfigFile(options: {
   readonly allowedLogins: readonly string[];
   readonly port?: number;
   readonly mode?: AuthMode;
+  /** Required for `cloudflare-access` unless the existing file already carries Access settings. */
+  readonly cloudflareAccess?: CloudflareAccessSettings;
 }): Promise<GatewayConfig> {
   const paths = defaultGatewayPaths();
   const snapshot = await captureGatewayConfigFile(paths.configPath);
@@ -743,16 +844,30 @@ export async function writeGatewayConfigFile(options: {
     : JSON.parse(snapshot.content) as { readonly omp?: Partial<GatewayConfig["omp"]> };
   const mode = options.mode ?? "tailscale-serve";
   const origin = new URL(options.publicOrigin);
-  if (origin.origin !== options.publicOrigin || (mode === "tailscale-serve" && origin.protocol !== "https:")) {
+  if (
+    origin.origin !== options.publicOrigin ||
+    ((mode === "tailscale-serve" || mode === "cloudflare-access") && origin.protocol !== "https:")
+  ) {
     throw new Error("production public origin must be an exact HTTPS origin");
   }
   const allowedLogins = [...new Set(options.allowedLogins.map(normalizeLogin))];
   if (mode === "tailscale-serve" && allowedLogins.length === 0) {
     throw new Error("at least one allowed Tailscale login is required");
   }
+  if (mode === "cloudflare-access" && allowedLogins.length === 0) {
+    throw new Error("at least one allowed Cloudflare Access login is required");
+  }
+  const cloudflareAccess = mode === "cloudflare-access"
+    ? (options.cloudflareAccess ?? priorConfig?.auth.cloudflareAccess)
+    : undefined;
+  if (mode === "cloudflare-access" && cloudflareAccess === undefined) {
+    throw new Error("cloudflare-access mode requires a team domain and audience");
+  }
   await assertPrivateDirectory(paths.configDir, true);
   await assertPrivateDirectory(paths.stateDir, true);
-  const configDocument: Pick<GatewayConfig, "http" | "auth" | "registry"> & { readonly omp?: Partial<GatewayConfig["omp"]> } = {
+  const configDocument: Pick<GatewayConfig, "http" | "auth" | "registry" | "federation"> & {
+    readonly omp?: Partial<GatewayConfig["omp"]>;
+  } = {
     // Preserve authored overrides without freezing home-derived defaults into a new config.
     ...(priorDocument?.omp === undefined ? {} : { omp: priorDocument.omp }),
     http: {
@@ -766,7 +881,12 @@ export async function writeGatewayConfigFile(options: {
       ...(priorConfig?.auth.trustIdentityWithoutTailnetDevice === true
         ? { trustIdentityWithoutTailnetDevice: true }
         : {}),
+      ...(cloudflareAccess === undefined
+        ? {}
+        : { cloudflareAccess: { teamDomain: cloudflareAccess.teamDomain, audience: cloudflareAccess.audience } }),
     },
+    // Fleet federation is authored by the host integration; reinstalling must not drop it.
+    ...(priorConfig?.federation === undefined ? {} : { federation: priorConfig.federation }),
     registry:
       priorConfig === undefined
         ? { heartbeatSeconds: 10, ttlSeconds: 35, maxSessions: 100 }
@@ -790,6 +910,8 @@ export async function writeGatewayConfigFile(options: {
     authoredConfig.auth.allowedLogins.length === priorConfig.auth.allowedLogins.length &&
     authoredConfig.auth.allowedLogins.every((login, index) => login === priorConfig.auth.allowedLogins[index]) &&
     authoredConfig.auth.trustIdentityWithoutTailnetDevice === priorConfig.auth.trustIdentityWithoutTailnetDevice &&
+    authoredConfig.auth.cloudflareAccess?.teamDomain === priorConfig.auth.cloudflareAccess?.teamDomain &&
+    authoredConfig.auth.cloudflareAccess?.audience === priorConfig.auth.cloudflareAccess?.audience &&
     authoredConfig.registry.heartbeatSeconds === priorConfig.registry.heartbeatSeconds &&
     authoredConfig.registry.ttlSeconds === priorConfig.registry.ttlSeconds &&
     authoredConfig.registry.maxSessions === priorConfig.registry.maxSessions;

@@ -76,17 +76,23 @@ test("activity-stop routes launch View even with a current ask or without Contro
           JSON.stringify(databaseNames), ...cacheUrls, ...cacheContents,
         ];
         const locations = (globalThis as typeof globalThis & { __notificationFetchLocations: string[] }).__notificationFetchLocations;
+        // The opened session is remembered for a reload as bare metadata; nothing else may persist.
+        const { "omp.sessions.active.v1": activeSelection, ...otherStorage } = { ...localStorage };
         return {
           leaked: sinks.some(sink => sink.includes(canary)),
           cacheUrls,
           routesScrubbed: locations.every(path => !path.includes("/collab/") && !path.includes("generation=")),
-          routePersisted: [location.href, JSON.stringify(history.state), JSON.stringify({ ...localStorage }), JSON.stringify({ ...sessionStorage })]
+          routePersisted: [location.href, JSON.stringify(history.state), JSON.stringify(otherStorage), JSON.stringify({ ...sessionStorage })]
             .some(sink => sink.includes("stop-route-instance-0001") || sink.includes("request-stop-route-instance-0001")),
+          activeSelection,
         };
       }, capabilityCanary);
       expect(residue.leaked).toBe(false);
       expect(residue.routesScrubbed).toBe(true);
       expect(residue.routePersisted).toBe(false);
+      expect(residue.activeSelection).toBe(
+        JSON.stringify({ version: 1, instanceId: current.instanceId, generation: 4, mode: "view" }),
+      );
       expect(residue.cacheUrls.every(url => !url.includes("/api/") && !url.includes("/client/") && !url.includes("/collab/"))).toBe(true);
       await page.goto("about:blank");
     } finally {
@@ -178,14 +184,14 @@ test("a tapped notification switches a live collaboration in place and never rel
     await page.evaluate(() => Object.defineProperty(globalThis, "__ompTappedDocument", { value: true }));
     const sameDocument = () => page.evaluate(() => "__ompTappedDocument" in globalThis);
 
-    // Another session's ask: Control of that session replaces the live View in this document.
+    // Another session's ask: Control of that session replaces the live collaboration in this document.
     await tapNotification(context, { version: 2, type: "attention", instanceId: asking.instanceId, requestId });
     await expect(page.locator(".shell-title")).toHaveText("tap-asking-instance-001");
     await expect(page.getByRole("application", { name: "OMP collaboration session" })).toBeVisible();
     await expect(page).toHaveURL(fixture.origin + "/client/");
     expect(await sameDocument()).toBe(true);
     expect(fixture.launchRequests).toEqual([
-      { instanceId: viewing.instanceId, generation: 1, mode: "view" },
+      { instanceId: viewing.instanceId, generation: 1, mode: "control" },
       { instanceId: asking.instanceId, generation: 1, mode: "control", requestId },
     ]);
 

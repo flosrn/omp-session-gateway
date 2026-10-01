@@ -127,6 +127,23 @@ function devDocument(patch: ConfigPatch = {}): Record<string, unknown> {
   };
 }
 
+const ACCESS = {
+  teamDomain: "https://team.cloudflareaccess.com",
+  audience: "4714c1358e65fe4b408ad6d432a5f878f08194bdb4752441fd56faefa9b2b6f2",
+} as const;
+
+const FEDERATION = { socketPath: "/run/omp-hub/gateway.sock", tokenFile: "/etc/omp-gateway/hub-token", pollSeconds: 5 } as const;
+
+function accessDocument(
+  patch: { readonly access?: Record<string, unknown>; readonly federation?: Record<string, unknown> } = {},
+): Record<string, unknown> {
+  return {
+    http: { hostname: "127.0.0.1", port: 4317, publicOrigin: "https://sessions.example.com" },
+    auth: { mode: "cloudflare-access", allowedLogins: ["User@Example.com"], cloudflareAccess: { ...ACCESS, ...patch.access } },
+    ...(patch.federation === undefined ? {} : { federation: patch.federation }),
+  };
+}
+
 const FAKE_CURRENT_SID = "S-1-5-21-2000000000-2000000001-2000000002-1001";
 const FULL_CONTROL_MASK = 2_032_127;
 
@@ -1317,6 +1334,166 @@ describe("production config authoring", () => {
     // The refused serve-mode write must not have replaced the config that is there.
     expect((await loadGatewayConfig({ configPath: paths.configPath })).auth.mode).toBe("dev-localhost");
   }, 20_000);
+
+  test("round-trips Access settings and a host-authored federation block through a reinstall", async () => {
+    const paths = await isolatedHome();
+    await mkdir(paths.configDir, { recursive: true, mode: 0o700 });
+    await writePrivateTextFile(paths.configPath, JSON.stringify(accessDocument({ federation: FEDERATION })));
+    const prior = await loadGatewayConfig({ configPath: paths.configPath });
+    const before = await readFile(paths.configPath, "utf8");
+
+    // Same settings: nothing to rewrite, and the loaded config carries both blocks.
+    const unchanged = await writeGatewayConfigFile({
+      publicOrigin: "https://sessions.example.com",
+      allowedLogins: ["user@example.com"],
+      mode: "cloudflare-access",
+    });
+    expect(unchanged).toEqual(prior);
+    expect(await readFile(paths.configPath, "utf8")).toBe(before);
+
+    const rewritten = await writeGatewayConfigFile({
+      publicOrigin: "https://sessions.example.com",
+      allowedLogins: ["other@example.com"],
+      mode: "cloudflare-access",
+    });
+    expect(rewritten.auth.cloudflareAccess).toEqual(ACCESS);
+    expect(rewritten.federation).toEqual(FEDERATION);
+    expect(await loadGatewayConfig({ configPath: paths.configPath })).toEqual(rewritten);
+
+    // Leaving Access mode drops its settings rather than persisting a block no mode reads.
+    const serve = await writeGatewayConfigFile({
+      publicOrigin: "https://gateway.example.ts.net",
+      allowedLogins: ["user@example.com"],
+    });
+    expect(serve.auth.cloudflareAccess).toBeUndefined();
+    expect(serve.federation).toEqual(FEDERATION);
+    await expect(
+      writeGatewayConfigFile({
+        publicOrigin: "https://sessions.example.com",
+        allowedLogins: ["user@example.com"],
+        mode: "cloudflare-access",
+      }),
+    ).rejects.toThrow("cloudflare-access mode requires a team domain and audience");
+  }, 20_000);
+});
+
+describe("Cloudflare Access and federation admission", () => {
+  test("loads an Access config with its settings and refuses it without them", async () => {
+    const loaded = await loadDocument(accessDocument());
+    expect(loaded.auth).toEqual({ mode: "cloudflare-access", allowedLogins: ["user@example.com"], cloudflareAccess: ACCESS });
+    const { cloudflareAccess: _omitted, ...bare } = accessDocument().auth as Record<string, unknown>;
+    await expect(loadDocument({ ...accessDocument(), auth: bare })).rejects.toThrow(
+      "cloudflare-access mode requires auth.cloudflareAccess",
+    );
+    await expect(loadDocument(serveDocument({ auth: { cloudflareAccess: ACCESS } }))).rejects.toThrow(
+      "auth.cloudflareAccess requires auth.mode cloudflare-access",
+    );
+  });
+
+  test("Access mode requires an HTTPS public origin and a non-empty allowlist", async () => {
+    await expect(
+      loadDocument({ ...accessDocument(), http: { hostname: "127.0.0.1", port: 4317, publicOrigin: "http://sessions.example.com" } }),
+    ).rejects.toThrow("cloudflare-access mode requires an exact HTTPS public origin");
+    await expect(
+      loadDocument({ ...accessDocument(), auth: { mode: "cloudflare-access", allowedLogins: [], cloudflareAccess: ACCESS } }),
+    ).rejects.toThrow("cloudflare-access mode requires at least one allowed login");
+  });
+
+  test("pins the team domain to one exact HTTPS cloudflareaccess.com origin", async () => {
+    for (const teamDomain of [
+      "http://team.cloudflareaccess.com",
+      "https://team.cloudflareaccess.com/",
+      "https://team.cloudflareaccess.com/cdn-cgi/access/certs",
+      "https://team.cloudflareaccess.com?x=1",
+      "https://team.cloudflareaccess.com#x",
+      "https://user:pass@team.cloudflareaccess.com",
+      "https://team.cloudflareaccess.com:8443",
+      "https://Team.cloudflareaccess.com",
+      "https://cloudflareaccess.com",
+      "https://a.b.cloudflareaccess.com",
+      "https://team.cloudflareaccess.com.evil.example",
+      "https://team-cloudflareaccess.com",
+      42,
+    ]) {
+      await expect(loadDocument(accessDocument({ access: { teamDomain } }))).rejects.toThrow(
+        "auth.cloudflareAccess.teamDomain must be an exact",
+      );
+    }
+  });
+
+  test("requires a 64-hex audience tag and refuses unknown Access keys", async () => {
+    for (const audience of ["", "A".repeat(64), "a".repeat(63), "a".repeat(65), "g".repeat(64), 7]) {
+      await expect(loadDocument(accessDocument({ access: { audience } }))).rejects.toThrow(
+        "auth.cloudflareAccess.audience must be",
+      );
+    }
+    await expect(loadDocument(accessDocument({ access: { serviceToken: "x" } }))).rejects.toThrow(
+      "unknown auth.cloudflareAccess key: serviceToken",
+    );
+  });
+
+  test("a dev-localhost override does not carry Access settings into a dev daemon", async () => {
+    const loaded = await loadDocument(accessDocument(), { mode: "dev-localhost" });
+    expect(loaded.auth.mode).toBe("dev-localhost");
+    expect(loaded.auth.cloudflareAccess).toBeUndefined();
+  });
+
+  test("accepts federation with private absolute paths and bounded polling", async () => {
+    const loaded = await loadDocument({ ...devDocument(), federation: FEDERATION });
+    expect(loaded.federation).toEqual(FEDERATION);
+    for (const pollSeconds of [1, 30]) {
+      const document = devDocument({ registry: { ttlSeconds: 61 } });
+      expect((await loadDocument({ ...document, federation: { ...FEDERATION, pollSeconds } })).federation?.pollSeconds).toBe(
+        pollSeconds,
+      );
+    }
+    expect((await loadDocument(devDocument())).federation).toBeUndefined();
+  });
+
+  test("requires the TTL to exceed two fleet poll intervals", async () => {
+    const document = (pollSeconds: number, ttlSeconds: number, heartbeatSeconds = 2) => ({
+      ...devDocument({ registry: { heartbeatSeconds, ttlSeconds } }),
+      federation: { ...FEDERATION, pollSeconds },
+    });
+    for (const [pollSeconds, ttlSeconds] of [[30, 5], [3, 6], [30, 60], [18, 35]] as const) {
+      await expect(loadDocument(document(pollSeconds, ttlSeconds))).rejects.toThrow(
+        "registry.ttlSeconds must exceed two federation poll intervals",
+      );
+    }
+    for (const [pollSeconds, ttlSeconds] of [[3, 7], [30, 61], [17, 35], [10, 35]] as const) {
+      const loaded = await loadDocument(document(pollSeconds, ttlSeconds));
+      expect(loaded.registry.ttlSeconds).toBe(ttlSeconds);
+      expect(loaded.federation?.pollSeconds).toBe(pollSeconds);
+    }
+    // Federation does not replace the standalone heartbeat bound.
+    await expect(loadDocument(document(3, 20, 10))).rejects.toThrow(
+      "registry.ttlSeconds must exceed two heartbeat intervals",
+    );
+  }, 20_000);
+
+  test("refuses federation paths and intervals it cannot pin down", async () => {
+    for (const pollSeconds of [0, 31, 1.5, "5", undefined]) {
+      await expect(loadDocument({ ...devDocument(), federation: { ...FEDERATION, pollSeconds } })).rejects.toThrow(
+        "federation.pollSeconds must be an integer from 1 to 30",
+      );
+    }
+    for (const socketPath of ["relative.sock", "/run/hub/../other.sock", "/run//hub.sock", "/run/hub\0.sock", "", undefined]) {
+      await expect(loadDocument({ ...devDocument(), federation: { ...FEDERATION, socketPath } })).rejects.toThrow(
+        "federation.socketPath must be a normalized absolute path",
+      );
+    }
+    await expect(
+      loadDocument({ ...devDocument(), federation: { ...FEDERATION, socketPath: `/${"s".repeat(103)}` } }),
+    ).rejects.toThrow("Unix socket path limit");
+    await expect(loadDocument({ ...devDocument(), federation: { ...FEDERATION, tokenFile: "token" } })).rejects.toThrow(
+      "federation.tokenFile must be a normalized absolute path",
+    );
+    await expect(loadDocument({ ...devDocument(), federation: { ...FEDERATION, url: "http://x" } })).rejects.toThrow(
+      "unknown federation config key: url",
+    );
+    await expect(loadDocument({ ...devDocument(), federation: [] })).rejects.toThrow("federation must be an object");
+  });
+
 });
 
 describe("Windows private-path ACL enforcement", () => {

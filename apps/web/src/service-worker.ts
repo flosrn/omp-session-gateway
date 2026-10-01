@@ -241,7 +241,9 @@ worker.addEventListener("fetch", event => {
       const cached = await cache.match(request);
       if (cached !== undefined) return cached;
       const response = await fetch(request);
-      if (response.ok) await cache.put(request, response.clone());
+      // An access proxy may answer an expired session with a redirect to its login page; only the
+      // asset itself, served directly, is an immutable shell entry.
+      if (response.ok && !response.redirected) await cache.put(request, response.clone());
       return response;
     }),
   );

@@ -48,6 +48,27 @@ no QR scans, copied links, or per-session setup.
 
 </div>
 
+## Private flosrn fleet fork
+
+This fork adds a managed fleet directory at `https://omp.shipmate.bot`, behind Cloudflare
+Access, for the Mac and HarnessOS compute hosts. Tap **Control** to open the same-origin pinned
+OMP client. Stale and empty hosts remain visible; unavailable sessions cannot launch.
+The upstream release links and qualification tables below describe upstream artifacts, not this
+fork's Access/federation deployment. Stock OMP remains unchanged.
+
+Reload and foreground recovery remember only `{version, instanceId, generation, mode}` in
+`localStorage` (`omp.sessions.active.v1`). A fresh authenticated snapshot must match the exact
+generation and role before a new capability is requested; a changed or missing session stays in
+the directory. **Back** clears the selection. No capability, link, title, path or transcript is
+stored for resume, and this does not keep a suspended phone browser running.
+
+Access mode is an explicit alternative authenticator in this fork, not permission to put a
+tunnel in front of `tailscale-serve`. That mode retains its existing fail-closed Serve boundary.
+See [fork configuration](docs/OPERATIONS.md#private-flosrn-fleet-deployment),
+[security limits](docs/SECURITY.md#private-flosrn-access-and-fleet-boundary), and
+[evidence scope](docs/COMPATIBILITY.md#private-flosrn-fork-evidence).
+
+
 > **Works with upstream OMP, not a gateway-specific build.** OMP's native collaboration registry
 > shipped in [v18.1.20](https://github.com/can1357/oh-my-pi/releases/tag/v18.1.20)
 > ([PR #11908](https://github.com/can1357/oh-my-pi/pull/11908)). Enable `collab.autoStart` once,

@@ -30,6 +30,7 @@ const expectedRuntimeDependencies = [
   "http_ece@1.2.0",
   "https-proxy-agent@7.0.6",
   "inherits@2.0.4",
+  "jose@6.2.12",
   "jwa@2.0.1",
   "jws@4.0.1",
   "katex@0.18.5",

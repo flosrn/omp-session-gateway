@@ -1,7 +1,12 @@
 import { ProtocolValidationError, SecretCapability } from "./secret.ts";
 import {
+  FLEET_HOST_PATTERN,
+  FLEET_LINK_ERRORS,
+  FLEET_NATIVE_INSTANCE_ID_PATTERN,
   MAX_FRAME_BYTES,
   INSTANCE_ID_PATTERN,
+  MAX_FLEET_HOST_ERROR_CODEPOINTS,
+  MAX_FLEET_HOSTS,
   MAX_LABEL_CODEPOINTS,
   MAX_PUSH_PENDING_COUNT,
   MAX_REQUEST_ID_BYTES,
@@ -9,6 +14,13 @@ import {
   MAX_SESSIONS,
   OMP_REGISTRY_VERSION,
   PUSH_API_VERSION,
+  type FleetBridgeHost,
+  type FleetBridgeSession,
+  type FleetBridgeSnapshot,
+  type FleetDirectoryStatus,
+  type FleetHostSummary,
+  type FleetHostStatus,
+  type FleetLinkError,
   type AttentionPushMessage,
   type BrowserPushSubscription,
   type LaunchMode,
@@ -219,7 +231,12 @@ function assertNoDuplicateObjectKeys(text: string): void {
 }
 
 export function parseJsonFrame(bytes: Uint8Array): unknown {
-  if (bytes.byteLength === 0 || bytes.byteLength > MAX_FRAME_BYTES) throw new ProtocolValidationError();
+  return parseBoundedJson(bytes, MAX_FRAME_BYTES);
+}
+
+/** `parseJsonFrame` with a caller-chosen ceiling, for peer documents larger than one frame. */
+export function parseBoundedJson(bytes: Uint8Array, maximumBytes: number): unknown {
+  if (bytes.byteLength === 0 || bytes.byteLength > maximumBytes) throw new ProtocolValidationError();
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -587,12 +604,53 @@ export function notificationRoutePath(intent: NotificationLaunchIntent): string 
     : path + "?activity=stopped&generation=" + requireInteger(intent.generation, 1);
 }
 
+const FLEET_METADATA_KEYS = ["host", "originalInstanceId", "hostStatus", "available"] as const;
+const FLEET_INSTANCE_ID_PATTERN = /^[0-9a-f]{64}$/u;
+const FLEET_HOST_STATUSES: Readonly<Record<FleetHostStatus, true>> = { live: true, stale: true, never: true };
+
+function requireFleetHostStatus(value: unknown): FleetHostStatus {
+  if (typeof value !== "string" || !Object.hasOwn(FLEET_HOST_STATUSES, value)) throw new ProtocolValidationError();
+  return value as FleetHostStatus;
+}
+
+function requirePatterned(value: unknown, pattern: RegExp): string {
+  if (typeof value !== "string" || !pattern.test(value)) throw new ProtocolValidationError();
+  return value;
+}
+
+/**
+ * Fleet metadata is all-or-nothing, and its invariants are what make an unavailable row safe to
+ * show: it can never claim Control, never report activity, and only a `live` machine is available.
+ */
+function parseFleetMetadata(record: JsonRecord): Pick<SessionMetadata, (typeof FLEET_METADATA_KEYS)[number]> {
+  const present = FLEET_METADATA_KEYS.filter(key => Object.hasOwn(record, key));
+  if (present.length === 0) return {};
+  if (present.length !== FLEET_METADATA_KEYS.length) throw new ProtocolValidationError();
+  const hostStatus = requireFleetHostStatus(record.hostStatus);
+  if (typeof record.available !== "boolean") throw new ProtocolValidationError();
+  if (record.available !== (hostStatus === "live")) throw new ProtocolValidationError();
+  if (!record.available && (record.canControl !== false || Object.hasOwn(record, "busy"))) {
+    throw new ProtocolValidationError();
+  }
+  // The bridge brokers Control only, so a fleet row never advertises View.
+  if (record.canView !== false) throw new ProtocolValidationError();
+  if (typeof record.instanceId !== "string" || !FLEET_INSTANCE_ID_PATTERN.test(record.instanceId)) {
+    throw new ProtocolValidationError();
+  }
+  return {
+    host: requirePatterned(record.host, FLEET_HOST_PATTERN),
+    originalInstanceId: requirePatterned(record.originalInstanceId, FLEET_NATIVE_INSTANCE_ID_PATTERN),
+    hostStatus,
+    available: record.available,
+  };
+}
+
 function parseSessionMetadata(value: unknown): SessionMetadata {
   const record = requireRecord(value);
   requireExactKeys(
     record,
     ["instanceId", "generation", "startedAt", "lastSeenAt", "canView", "canControl"],
-    ["title", "cwdLabel", "model", "inputRequired", "ask", "busy"],
+    ["title", "cwdLabel", "model", "inputRequired", "ask", "busy", ...FLEET_METADATA_KEYS],
   );
   if (
     typeof record.canView !== "boolean" ||
@@ -619,6 +677,7 @@ function parseSessionMetadata(value: unknown): SessionMetadata {
       ...(optionCount === undefined ? {} : { optionCount }),
     };
   }
+  const fleet = parseFleetMetadata(record);
   const inputRequired = record.inputRequired ?? false;
   if ((inputRequired && ask === undefined) || (!inputRequired && ask !== undefined)) {
     throw new ProtocolValidationError();
@@ -636,6 +695,7 @@ function parseSessionMetadata(value: unknown): SessionMetadata {
     inputRequired,
     ...(record.busy === undefined ? {} : { busy: record.busy as boolean }),
     ...(ask === undefined ? {} : { ask }),
+    ...fleet,
   };
 }
 
@@ -644,23 +704,66 @@ function parseSessionArray(value: unknown): readonly SessionMetadata[] {
   return value.map(parseSessionMetadata);
 }
 
+function parseFleetHostSummaries(value: unknown): readonly FleetHostSummary[] {
+  if (!Array.isArray(value) || value.length > MAX_FLEET_HOSTS) throw new ProtocolValidationError();
+  const seen = new Set<string>();
+  return value.map(item => {
+    const record = requireRecord(item);
+    requireExactKeys(record, ["host", "status", "ageSeconds"], ["error"]);
+    const host = requirePatterned(record.host, FLEET_HOST_PATTERN);
+    if (seen.has(host)) throw new ProtocolValidationError();
+    seen.add(host);
+    const status = requireFleetHostStatus(record.status);
+    const ageSeconds = record.ageSeconds === null ? null : requireInteger(record.ageSeconds, 0);
+    if ((status === "never") !== (ageSeconds === null)) throw new ProtocolValidationError();
+    const error = optionalFleetError(record.error);
+    return { host, status, ageSeconds, ...(error === undefined ? {} : { error }) };
+  });
+}
+
+function optionalFleetError(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw new ProtocolValidationError();
+  const normalized = value.normalize("NFC").replace(DISALLOWED_LABEL_PATTERN, "").trim();
+  if ([...normalized].length > MAX_FLEET_HOST_ERROR_CODEPOINTS) throw new ProtocolValidationError();
+  return normalized === "" ? undefined : normalized;
+}
+
+const FLEET_DIRECTORY_STATUSES: Readonly<Record<FleetDirectoryStatus, true>> = { ok: true, unreachable: true };
+
+function optionalFleetStatus(value: unknown): FleetDirectoryStatus | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !Object.hasOwn(FLEET_DIRECTORY_STATUSES, value)) throw new ProtocolValidationError();
+  return value as FleetDirectoryStatus;
+}
+
+function fleetDirectoryFields(record: JsonRecord): Pick<SessionListResponse, "hosts" | "fleetStatus"> {
+  const fleetStatus = optionalFleetStatus(record.fleetStatus);
+  return {
+    ...(record.hosts === undefined ? {} : { hosts: parseFleetHostSummaries(record.hosts) }),
+    ...(fleetStatus === undefined ? {} : { fleetStatus }),
+  };
+}
+
 export function parseSessionListResponse(value: unknown): SessionListResponse {
   const record = requireRecord(value);
-  requireExactKeys(record, ["revision", "sessions"]);
+  requireExactKeys(record, ["revision", "sessions"], ["hosts", "fleetStatus"]);
   return {
     revision: requireInteger(record.revision, 0),
     sessions: parseSessionArray(record.sessions),
+    ...fleetDirectoryFields(record),
   };
 }
 
 export function parseSessionEvent(value: unknown): SessionEvent {
   const record = requireRecord(value);
   if (record.type === "snapshot") {
-    requireExactKeys(record, ["type", "revision", "sessions"]);
+    requireExactKeys(record, ["type", "revision", "sessions"], ["hosts", "fleetStatus"]);
     return {
       type: "snapshot",
       revision: requireInteger(record.revision, 0),
       sessions: parseSessionArray(record.sessions),
+      ...fleetDirectoryFields(record),
     };
   }
   if (record.type === "session_upsert") {
@@ -695,14 +798,29 @@ export function parseLaunchResponse(value: unknown): LaunchResponse {
 }
 
 /**
- * Projects one observed host onto the browser-safe directory record. `canView` is unconditional:
- * every published host answers a `view` link request, while `control` depends on how the session
- * was shared. No capability is involved — those are fetched per launch, straight from the host.
+ * Projects one observed host onto the browser-safe directory record. A standalone host always
+ * answers a `view` link request, while `control` depends on how the session was shared. A fleet
+ * record is Control-only (the bridge brokers nothing else), and an unavailable one claims neither
+ * Control nor activity. No capability is involved — those are fetched per launch.
  */
 export function sessionMetadataFromObserved(
   input: ObservedSessionInput,
   lastSeenAt: string,
 ): { metadata: SessionMetadata; immutableIdentity: string } {
+  const { host, originalInstanceId, hostStatus, available } = input;
+  let fleetFields: Pick<SessionMetadata, "host" | "originalInstanceId" | "hostStatus" | "available"> = {};
+  if (host !== undefined || originalInstanceId !== undefined || hostStatus !== undefined || available !== undefined) {
+    if (
+      host === undefined || originalInstanceId === undefined || hostStatus === undefined || available === undefined ||
+      available !== (hostStatus === "live")
+    ) {
+      throw new ProtocolValidationError();
+    }
+    fleetFields = { host, originalInstanceId, hostStatus, available };
+  }
+  const fleet = fleetFields.host !== undefined;
+  const unavailable = available === false;
+  const base = `${input.pid}\0${input.sessionId}\0${input.startedAt}`;
   return {
     metadata: {
       instanceId: input.instanceId,
@@ -712,11 +830,205 @@ export function sessionMetadataFromObserved(
       ...(input.model === undefined ? {} : { model: input.model }),
       startedAt: input.startedAt,
       lastSeenAt,
-      canView: true,
-      canControl: input.canControl,
+      canView: !fleet,
+      canControl: input.canControl && !unavailable,
       inputRequired: input.inputRequired,
-      ...(input.busy === undefined ? {} : { busy: input.busy }),
+      ...(input.busy === undefined || unavailable ? {} : { busy: input.busy }),
+      ...fleetFields,
     },
-    immutableIdentity: `${input.pid}\0${input.sessionId}\0${input.startedAt}`,
+    // Freshness is not identity: a machine going stale and back keeps the same room.
+    immutableIdentity: fleet ? `${host}\0${originalInstanceId}\0${base}` : base,
   };
+}
+
+/**
+ * Projects one bridge session onto a directory input under its machine-qualified identity, which
+ * the caller derives (SHA-256 of host + "\0" + native id) because hashing is not portable here.
+ * A session without a generation or a start time has no launchable identity, so it yields nothing
+ * rather than an invented one. Control needs the hub's explicit `canControl`, a live machine and
+ * a connected relay (the guest client reaches the room through it); none of these is inferred.
+ * `available` is machine freshness only: a live machine's row stays visible and available.
+ */
+export function observedSessionFromFleet(
+  host: FleetBridgeHost,
+  session: FleetBridgeSession,
+  directoryInstanceId: string,
+): ObservedSessionInput | undefined {
+  if (session.generation === null || session.roomSince === null) return undefined;
+  if (!FLEET_INSTANCE_ID_PATTERN.test(directoryInstanceId)) throw new ProtocolValidationError();
+  const title = optionalLabel(session.title ?? undefined);
+  const cwdLabel = optionalLabel(
+    session.cwd === null ? undefined : (session.cwd.replace(/[/\\]+$/u, "").split(/[/\\]/u).pop() ?? undefined),
+  );
+  const { provider, id } = session.model ?? { provider: null, id: null };
+  const model = optionalLabel(id === null ? undefined : provider === null ? id : `${provider}/${id}`);
+  const available = host.status === "live";
+  return {
+    instanceId: directoryInstanceId,
+    generation: session.generation,
+    pid: session.pid,
+    sessionId: session.sessionId ?? "",
+    startedAt: new Date(session.roomSince).toISOString(),
+    canControl: available && session.relayConnected && session.canControl === true,
+    inputRequired: session.state === "needs-input",
+    ...(!available || session.state === "needs-input" || session.state === "unknown"
+      ? {}
+      : { busy: session.state === "working" }),
+    ...(title === undefined || title === "" ? {} : { title }),
+    ...(cwdLabel === undefined || cwdLabel === "" ? {} : { cwdLabel }),
+    ...(model === undefined || model === "" ? {} : { model }),
+    host: host.host,
+    originalInstanceId: session.instanceId,
+    hostStatus: host.status,
+    available,
+  };
+}
+
+/** One machine's browser-safe summary: freshness and why it failed, never its sessions. */
+export function fleetHostSummary(host: FleetBridgeHost): FleetHostSummary {
+  const error = optionalFleetError(host.error);
+  return {
+    host: host.host,
+    status: host.status,
+    ageSeconds: host.ageSeconds,
+    ...(error === undefined ? {} : { error }),
+  };
+}
+
+const FLEET_SESSION_STATES = { "needs-input": true, working: true, idle: true, unknown: true } as const;
+const MAX_FLEET_SESSIONS_PER_HOST = 200;
+
+function nullableBoundedString(value: unknown, maximumLength: number): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string" || value.length > maximumLength || value.includes("\0")) {
+    throw new ProtocolValidationError();
+  }
+  return value;
+}
+
+function nullableInteger(value: unknown, minimum: number, maximum = Number.MAX_SAFE_INTEGER): number | null {
+  return value === null ? null : requireInteger(value, minimum, maximum);
+}
+
+function parseFleetBridgeSession(value: unknown): FleetBridgeSession {
+  const record = requireRecord(value);
+  requireExactKeys(
+    record,
+    ["instanceId", "generation", "sessionId", "title", "pid", "cwd", "model", "roomSince", "state", "guests",
+      "relayConnected", "tmuxSession"],
+    ["canControl"],
+  );
+  if (typeof record.state !== "string" || !Object.hasOwn(FLEET_SESSION_STATES, record.state)) {
+    throw new ProtocolValidationError();
+  }
+  if (typeof record.relayConnected !== "boolean") throw new ProtocolValidationError();
+  if (record.canControl !== undefined && typeof record.canControl !== "boolean") throw new ProtocolValidationError();
+  let model: FleetBridgeSession["model"] = null;
+  if (record.model !== null) {
+    const modelRecord = requireRecord(record.model);
+    requireExactKeys(modelRecord, ["provider", "id"]);
+    model = { provider: nullableBoundedString(modelRecord.provider, 64), id: nullableBoundedString(modelRecord.id, 128) };
+  }
+  return {
+    instanceId: requirePatterned(record.instanceId, FLEET_NATIVE_INSTANCE_ID_PATTERN),
+    // A generation is a positive room counter; zero or negative is malformed, null is unknown.
+    generation: nullableInteger(record.generation, 1),
+    sessionId: nullableBoundedString(record.sessionId, 128),
+    title: nullableBoundedString(record.title, 256),
+    pid: requireInteger(record.pid, 1, 2_147_483_647),
+    cwd: nullableBoundedString(record.cwd, 512),
+    model,
+    // ECMAScript TimeClip limit: every accepted timestamp must survive ISO projection.
+    roomSince: nullableInteger(record.roomSince, 0, 8_640_000_000_000_000),
+    state: record.state as FleetBridgeSession["state"],
+    guests: requireInteger(record.guests, 0),
+    relayConnected: record.relayConnected,
+    tmuxSession: nullableBoundedString(record.tmuxSession, 128),
+    ...(record.canControl === undefined ? {} : { canControl: record.canControl }),
+  };
+}
+
+function parseFleetBridgeHost(value: unknown): FleetBridgeHost {
+  const record = requireRecord(value);
+  requireExactKeys(record, ["host", "source", "status", "ageSeconds", "error", "sessions"]);
+  if (record.source !== "hub" && record.source !== "mac") throw new ProtocolValidationError();
+  if (!Array.isArray(record.sessions) || record.sessions.length > MAX_FLEET_SESSIONS_PER_HOST) {
+    throw new ProtocolValidationError();
+  }
+  const sessions = record.sessions.map(parseFleetBridgeSession);
+  // Two rows claiming one native identity on one machine make the directory identity ambiguous.
+  if (new Set(sessions.map(session => session.instanceId)).size !== sessions.length) {
+    throw new ProtocolValidationError();
+  }
+  const status = requireFleetHostStatus(record.status);
+  const ageSeconds = nullableInteger(record.ageSeconds, 0);
+  if ((status === "never") !== (ageSeconds === null)) throw new ProtocolValidationError();
+  if (status === "never" && sessions.length > 0) throw new ProtocolValidationError();
+  return {
+    host: requirePatterned(record.host, FLEET_HOST_PATTERN),
+    source: record.source,
+    status,
+    ageSeconds,
+    error: nullableBoundedString(record.error, MAX_FLEET_HOST_ERROR_CODEPOINTS),
+    sessions,
+  };
+}
+
+/**
+ * `GET /gateway/sessions` from the HarnessOS bridge. Exact keys throughout: the bridge is a peer we
+ * own, so an unknown field is drift to review rather than an additive extension to ignore. A
+ * machine named twice would make every identity on it ambiguous, so the whole document is refused.
+ */
+export function parseFleetBridgeSnapshot(value: unknown): FleetBridgeSnapshot {
+  const record = requireRecord(value);
+  requireExactKeys(record, ["hosts"]);
+  if (!Array.isArray(record.hosts) || record.hosts.length > MAX_FLEET_HOSTS) throw new ProtocolValidationError();
+  const hosts = record.hosts.map(parseFleetBridgeHost);
+  if (new Set(hosts.map(host => host.host)).size !== hosts.length) throw new ProtocolValidationError();
+  if (hosts.reduce((total, host) => total + host.sessions.length, 0) > MAX_SESSIONS) throw new ProtocolValidationError();
+  return { hosts };
+}
+
+const FLEET_CONTROL_FRAGMENT_PATTERN = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{64}$/u;
+const MAX_FLEET_CONTROL_URL_LENGTH = 2_048;
+
+export type FleetLinkOutcome =
+  | { readonly ok: true; readonly capability: SecretCapability }
+  | { readonly ok: false; readonly error: FleetLinkError };
+
+/**
+ * `POST /gateway/open` from the HarnessOS bridge. A success must be exactly a hosted-client
+ * control link — `https://my.omp.sh/#<room>.<key>` with nothing else — so a redirect, a query, or
+ * a View key fails closed. The link is wrapped before it can be logged or copied.
+ */
+export function parseFleetLinkOutcome(value: unknown): FleetLinkOutcome {
+  const record = requireRecord(value);
+  if (Object.hasOwn(record, "error")) {
+    requireExactKeys(record, ["error"]);
+    if (typeof record.error !== "string" || !(FLEET_LINK_ERRORS as readonly string[]).includes(record.error)) {
+      throw new ProtocolValidationError();
+    }
+    return { ok: false, error: record.error as FleetLinkError };
+  }
+  requireExactKeys(record, ["url"]);
+  const raw = record.url;
+  if (typeof raw !== "string" || raw.length > MAX_FLEET_CONTROL_URL_LENGTH) throw new ProtocolValidationError();
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ProtocolValidationError();
+  }
+  if (
+    url.href !== raw ||
+    url.origin !== "https://my.omp.sh" ||
+    url.pathname !== "/" ||
+    url.search !== "" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    !FLEET_CONTROL_FRAGMENT_PATTERN.test(url.hash.slice(1))
+  ) {
+    throw new ProtocolValidationError();
+  }
+  return { ok: true, capability: SecretCapability.from(raw) };
 }

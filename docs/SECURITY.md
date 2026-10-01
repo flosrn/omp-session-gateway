@@ -9,7 +9,39 @@ The project reduces manual secret handling; it does not make an OMP collaboratio
 Stock OMP `>= 18.1.20` supplies the native collaboration controller and local registry. No fork,
 custom OMP build, or gateway-specific OMP plugin is required. The separately installed gateway
 reads metadata and brokers one capability per authorized launch; native integration does not
-remove the TUN-mode Tailscale Serve, allowlist, or user-controlled-workstation requirements below.
+remove the TUN-mode Tailscale Serve, allowlist, or user-controlled-workstation requirements for
+`tailscale-serve` below. The private fork's explicit alternative is scoped separately here.
+
+## Private flosrn Access and fleet boundary
+
+The following alternative is specific to this fork; the Serve-only rules below still apply to
+`tailscale-serve`. Never expose that header-authenticated mode through Cloudflare Tunnel or another
+forwarder. Configure `cloudflare-access` explicitly for the fleet deployment; no Serve or convenience
+email header is a fallback. The peer must still be loopback, and static assets also require auth.
+
+`Cf-Access-Jwt-Assertion` must be an RS256 human application token (`type: app`, no `common_name`),
+with verified exact issuer, pinned application audience, valid expiry, issued-at, subject and email
+claims, and `nbf` when present. The normalized email must match `auth.allowedLogins` exactly.
+Keys come only from the configured HTTPS team origin's `/cdn-cgi/access/certs`; redirects are not
+followed. Expiry has no skew tolerance; `nbf`/`iat` tolerate 30 seconds. Verification failures are
+opaque and never log the assertion or JOSE errors. Origin/Fetch-Site protections remain in force.
+
+**Revocation limit:** verification uses cached signing keys, not Access identity introspection.
+Revoking an Access session/user does not invalidate an otherwise valid assertion at the backend
+before its expiry. SSE captures the verified expiry at admission and checks it offline on keepalive;
+it does not fetch JWKS again, so a later key-service outage does not end the admitted stream before
+expiry. Launch revalidates authorization before revealing a capability. Access
+revocation does **not** kill an existing collaboration connection: an already-delivered bearer
+capability remains governed by OMP room revocation. Stop/rotate that OMP room to revoke its guests.
+
+Federation is limited to a private gateway-only socket exposing two session routes, not the Hub's
+owner/admin listener. Its separate bearer is compared with `HUB_SESSION_GATEWAY_TOKEN_SHA256`;
+unset refuses all requests. Gateway token files are owner-only regular files, reread per request
+without following symlinks. The bridge hash, bearer, Access assertions and capabilities must never
+enter diagnostics or logs. Fleet hashes and resume selections authorize nothing on their own.
+Resume stores only version/instance/generation/mode and must fetch fresh auth, metadata and an
+exact-generation capability; no title, path, link, transcript or capability is persisted.
+
 
 ## 2. Assets
 

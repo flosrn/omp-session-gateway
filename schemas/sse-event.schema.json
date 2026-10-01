@@ -10,7 +10,9 @@
       "properties": {
         "type": { "const": "snapshot" },
         "revision": { "$ref": "session-list.schema.json#/properties/revision" },
-        "sessions": { "$ref": "session-list.schema.json#/properties/sessions" }
+        "sessions": { "$ref": "session-list.schema.json#/properties/sessions" },
+        "hosts": { "$ref": "session-list.schema.json#/properties/hosts" },
+        "fleetStatus": { "$ref": "session-list.schema.json#/properties/fleetStatus" }
       }
     },
     {

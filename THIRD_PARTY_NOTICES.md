@@ -89,6 +89,13 @@ source locations, and required attributions are included at the stated archive p
 - Copyright: Copyright (c) Isaac Z. Schlueter
 - License text: `licenses/runtime/inherits/LICENSE`
 
+### jose@6.2.12
+
+- Source: <https://github.com/panva/jose/tree/v6.2.12>
+- License: MIT
+- Copyright: Copyright (c) 2018 Filip Skokan
+- License text: `licenses/runtime/jose/LICENSE`
+
 ### jwa@2.0.1
 
 - Source: <https://github.com/brianloveswords/node-jwa/tree/2.0.1>

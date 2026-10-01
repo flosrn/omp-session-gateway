@@ -1,6 +1,21 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { MAX_SESSIONS, type SessionMetadata } from "@omp-session-gateway/protocol";
+import { MAX_SESSIONS, type FleetHostSummary, type SessionMetadata } from "@omp-session-gateway/protocol";
 import fc, { type AsyncCommand } from "fast-check";
+import type { CollabEmbedOptions, CollabEmbedState } from "../../../packages/collab-client/upstream/src/embed-contract";
+
+let embedStateSink: ((state: CollabEmbedState) => void) | undefined;
+/** Test seam imported by app.ts only when a launch fixture sets the collab module URL. */
+export function startCollabWithCapability(
+  _container: HTMLElement,
+  _capability: string,
+  _onDispose: () => void,
+  options?: CollabEmbedOptions,
+): () => void {
+  embedStateSink = options?.onStateChange;
+  return () => {
+    embedStateSink = undefined;
+  };
+}
 
 const GLOBAL_NAMES = [
   "window",
@@ -15,6 +30,8 @@ const GLOBAL_NAMES = [
   "fetch",
   "localStorage",
   "HTMLElement",
+  "__COLLAB_CLIENT_MODULE__",
+  "__COLLAB_CLIENT_STYLESHEET__",
 ] as const;
 const nativeGlobals = Object.fromEntries(
   GLOBAL_NAMES.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]),
@@ -83,6 +100,9 @@ class FakeElement extends EventTarget {
   replaceChildren(...children: FakeElement[]): void {
     this.children.splice(0, this.children.length, ...children);
   }
+  remove(): void {
+    this.children.splice(0, this.children.length);
+  }
 
   setAttribute(name: string, value: string): void {
     this.attributes.set(name, value);
@@ -116,6 +136,7 @@ class FakeElement extends EventTarget {
 
   querySelectorAll(selector: string): FakeElement[] {
     const matches = (element: FakeElement): boolean => {
+      if (selector === "link[data-omp-collab-styles]") return element.dataset.ompCollabStyles === "true";
       if (selector.startsWith(".")) return element.className.split(/\s+/u).includes(selector.slice(1));
       if (selector.startsWith("#")) return element.id === selector.slice(1);
       return element.tagName.toLowerCase() === selector.toLowerCase();
@@ -203,6 +224,9 @@ class FakeWindow extends EventTarget {
 }
 
 class FakeDocument extends EventTarget {
+  readonly body = new FakeElement("body");
+  readonly head = new FakeElement("head");
+  title = "OMP Sessions";
   readonly documentElement = {
     dataset: {} as Record<string, string>,
     style: {} as Record<string, string>,
@@ -214,6 +238,7 @@ class FakeDocument extends EventTarget {
     readonly detailInputs: readonly FakeElement[],
   ) {
     super();
+    this.body.append(...Object.values(bySelector));
   }
 
   querySelector(selector: string): FakeElement | null {
@@ -276,6 +301,8 @@ class FakeBrowserNotification {
 }
 
 interface BrowserHarness {
+  readonly body: FakeElement;
+  setEmbedState(state: CollabEmbedState): void;
   readonly elements: {
     readonly sessionList: FakeElement;
     readonly notificationButton: FakeElement;
@@ -308,6 +335,7 @@ interface BrowserHarness {
   readonly reloads: { count: number };
   readonly fetchPaths: string[];
   readonly fetchLocations: string[];
+  readonly fetchInits: readonly { readonly path: string; readonly init: RequestInit }[];
   readonly permissionRequests: { count: number };
   readonly subscriptionRequests: unknown[];
   readonly unsubscribeRequests: unknown[];
@@ -319,7 +347,14 @@ interface BrowserHarness {
   readonly notifications: readonly FakeBrowserNotification[];
   addNotification(tag: string, data: unknown): FakeBrowserNotification;
   emit(type: "snapshot" | "session_upsert" | "session_remove" | "keepalive", payload: unknown): void;
-  setList(revision: number, sessions: readonly SessionMetadata[], status?: number): void;
+  setList(
+    revision: number,
+    sessions: readonly SessionMetadata[],
+    status?: number,
+    hosts?: readonly FleetHostSummary[],
+    fleetStatus?: "ok" | "unreachable",
+  ): void;
+  holdNextLaunch(): Promise<void>;
 }
 
 function session(
@@ -368,6 +403,9 @@ async function bootApp(options: {
   readonly pathname?: string;
   readonly search?: string;
   readonly storage?: FakeStorage;
+  readonly initialHosts?: readonly FleetHostSummary[];
+  readonly initialFleetStatus?: "ok" | "unreachable";
+  readonly launchStatus?: number;
   readonly suffix: string;
 }): Promise<BrowserHarness> {
   FakeEventSource.instances.length = 0;
@@ -418,6 +456,7 @@ async function bootApp(options: {
     "#notification-detail-options": notificationDetailOptions,
     "#network-recovery-help": networkRecoveryHelp,
     "#network-recovery-help-close": networkRecoveryHelpClose,
+    "link[data-omp-collab-styles]": new FakeElement("link"),
   };
   const document = new FakeDocument(bySelector, notificationDetailInputs);
   const window = new FakeWindow();
@@ -452,8 +491,13 @@ async function bootApp(options: {
   };
   const fetchPaths: string[] = [];
   const fetchLocations: string[] = [];
+  const fetchInits: { readonly path: string; readonly init: RequestInit }[] = [];
   let listRevision = 1;
   let listSessions = [...options.initialSessions];
+  let listHosts = options.initialHosts;
+  let listFleetStatus = options.initialFleetStatus;
+  let launchStatus = options.launchStatus ?? 200;
+  let heldLaunch: Promise<void> | undefined;
   let listStatus = 200;
   const workerMessages: unknown[] = [];
   let hangingListRequests = 0;
@@ -546,6 +590,7 @@ async function bootApp(options: {
     const path = typeof input === "string" ? input : input instanceof URL ? input.pathname : new URL(input.url).pathname;
     fetchPaths.push(path);
     fetchLocations.push(location.pathname + location.search);
+    fetchInits.push({ path, init });
     if (path === "/api/v1/push/config") {
       return Response.json({ version: 2, applicationServerKey: "V".repeat(87) });
     }
@@ -559,6 +604,16 @@ async function bootApp(options: {
       return Response.json({
         version: 2,
         detailLevel: body.detailLevel ?? "session",
+      });
+    }
+    if (path.endsWith("/launch")) {
+      if (heldLaunch !== undefined) await heldLaunch;
+      if (launchStatus !== 200) return new Response("", { status: launchStatus });
+      const request = typeof init.body === "string" ? JSON.parse(init.body) as { mode?: unknown; generation?: unknown } : {};
+      return Response.json({
+        mode: request.mode,
+        generation: request.generation,
+        capability: "capability-canary",
       });
     }
     if (path !== "/api/v1/sessions") throw new Error(`unexpected fetch: ${path}`);
@@ -576,7 +631,12 @@ async function bootApp(options: {
       });
     }
     if (listStatus !== 200) return new Response("", { status: listStatus });
-    return Response.json({ revision: listRevision, sessions: listSessions });
+    return Response.json({
+      revision: listRevision,
+      sessions: listSessions,
+      ...(listHosts === undefined ? {} : { hosts: listHosts }),
+      ...(listFleetStatus === undefined ? {} : { fleetStatus: listFleetStatus }),
+    });
   };
 
   Object.defineProperties(globalThis, {
@@ -593,6 +653,12 @@ async function bootApp(options: {
     fetch: { configurable: true, value: fetch },
     isSecureContext: { configurable: true, value: true },
     HTMLElement: { configurable: true, value: class extends EventTarget {} },
+    ...(options.launchStatus === undefined
+      ? {}
+      : {
+          __COLLAB_CLIENT_MODULE__: { configurable: true, value: import.meta.url },
+          __COLLAB_CLIENT_STYLESHEET__: { configurable: true, value: "/client/collab.css" },
+        }),
   });
 
   // app.ts bootstraps at import time, so a cache-busted test module is required for an isolated page.
@@ -604,6 +670,10 @@ async function bootApp(options: {
   }
 
   return {
+    body: document.body,
+    setEmbedState(state): void {
+      embedStateSink?.(state);
+    },
     elements: {
       sessionList,
       statusBanner,
@@ -623,6 +693,7 @@ async function bootApp(options: {
     },
     fetchPaths,
     fetchLocations,
+    fetchInits,
     permissionRequests,
     subscriptionRequests,
     unsubscribeRequests,
@@ -682,10 +753,22 @@ async function bootApp(options: {
       serviceWorker.controller = {};
       serviceWorker.dispatchEvent(new Event("controllerchange"));
     },
-    setList(revision, sessions, status = 200): void {
+    holdNextLaunch(): Promise<void> {
+      let release: () => void = () => undefined;
+      heldLaunch = new Promise<void>(resolve => {
+        release = () => {
+          heldLaunch = undefined;
+          resolve();
+        };
+      });
+      return Promise.resolve().then(release);
+    },
+    setList(revision, sessions, status = 200, hosts = listHosts, fleetStatus = listFleetStatus): void {
       listRevision = revision;
       listSessions = [...sessions];
       listStatus = status;
+      listHosts = hosts;
+      listFleetStatus = fleetStatus;
     },
   };
 }
@@ -1654,6 +1737,390 @@ describe("dashboard attention and notifications", () => {
     expect(harness.localStorage.getItem("omp.sessions.dismissed.v1")).toBe(dismissedBefore);
     expect(harness.elements.sessionList.querySelectorAll(".held-row")).toHaveLength(1);
     expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(0);
+  });
+});
+
+const ACTIVE_SELECTION_KEY = "omp.sessions.active.v1";
+
+function fleetSession(
+  fill: string,
+  host: string,
+  hostStatus: FleetHostSummary["status"],
+  overrides: Partial<SessionMetadata> = {},
+): SessionMetadata {
+  const available = hostStatus === "live";
+  return session(fill.repeat(64), {
+    host,
+    originalInstanceId: `native-${fill}`,
+    hostStatus,
+    available,
+    canView: false,
+    canControl: available,
+    ...overrides,
+  });
+}
+
+function rememberedSelection(instanceId: string, extra: Record<string, unknown> = {}): string {
+  return JSON.stringify({ version: 1, instanceId, generation: 1, mode: "control", ...extra });
+}
+
+async function drainMicrotasks(): Promise<void> {
+  for (let index = 0; index < 50; index += 1) await Promise.resolve();
+}
+
+describe("fleet directory, sign-in, and remembered selection", () => {
+  test("labels machines, keeps unreachable rows visible but inert, and lists empty and never-reached machines", async () => {
+    const live = fleetSession("a", "mac-studio", "live", { title: "Live build" });
+    const stale = fleetSession("b", "gapicore", "stale", { title: "Stale build" });
+    const liveAsk = fleetSession("c", "mac-studio", "live", {
+      title: "Live question",
+      inputRequired: true,
+      lastSeenAt: "2026-07-21T10:05:00.000Z",
+    });
+    // Older than the live question, so only availability can keep it out of the hero.
+    const staleAsk = fleetSession("d", "gapicore", "stale", {
+      title: "Stale question",
+      inputRequired: true,
+      lastSeenAt: "2026-07-21T10:00:00.000Z",
+    });
+    const hosts = [
+      { host: "mac-studio", status: "live", ageSeconds: 2 },
+      { host: "gapicore", status: "stale", ageSeconds: 600 },
+      { host: "pi-lab", status: "never", ageSeconds: null },
+      { host: "idle-box", status: "live", ageSeconds: 1 },
+    ] as const satisfies readonly FleetHostSummary[];
+    const harness = await bootApp({
+      permission: "denied",
+      suffix: "fleet-directory",
+      initialSessions: [live, stale, liveAsk, staleAsk],
+      initialHosts: hosts,
+    });
+    const list = harness.elements.sessionList;
+
+    const hero = list.querySelector(".queue-hero");
+    expect(hero?.querySelector("h2")?.textContent).toBe("Live question");
+    expect(hero?.querySelector(".session-summary")?.textContent).toBe("mac-studio · project · provider/model");
+    expect(hero?.querySelector(".action-request")?.textContent).toBe("Open request");
+    expect(hero?.querySelector(".action-request")?.disabled).toBeFalse();
+    // Fleet rows never offer View, so the hero has no transcript alternative.
+    expect(hero?.querySelectorAll(".hero-alt").map(action => action.textContent)).toEqual(["Hold for desk"]);
+
+    const [queued] = list.querySelectorAll(".queue-row");
+    expect(queued?.disabled).toBeTrue();
+    expect(queued?.getAttribute("aria-label")).toBe("Stale question on gapicore — Machine unreachable");
+    expect(queued?.querySelector(".row-time")?.textContent).toBe("gapicore · Machine unreachable");
+
+    const working = new Map(list.querySelectorAll(".working-row").map(row => [row.dataset.instanceId, row]));
+    const liveRow = working.get(live.instanceId);
+    expect(liveRow?.disabled).toBeFalse();
+    expect(liveRow?.getAttribute("aria-label")).toBe("Control Live build on mac-studio");
+    expect(liveRow?.querySelector(".row-host")?.textContent).toBe("· mac-studio");
+    const staleRow = working.get(stale.instanceId);
+    expect(staleRow?.disabled).toBeTrue();
+    expect(staleRow?.getAttribute("aria-label")).toBe("Stale build on gapicore — Machine unreachable");
+    expect(staleRow?.querySelector(".row-unavailable")?.textContent).toBe("· Machine unreachable");
+    staleRow?.dispatchEvent(new Event("click"));
+    queued?.dispatchEvent(new Event("click"));
+    await drainMicrotasks();
+    expect(harness.fetchPaths.some(path => path.endsWith("/launch"))).toBeFalse();
+
+    const machines = (): string[][] =>
+      list.querySelectorAll(".host-row").map(row => [
+        row.querySelector(".host-name")?.textContent ?? "",
+        row.querySelector(".host-state")?.textContent ?? "",
+      ]);
+    expect(list.querySelector(".host-summary")?.getAttribute("aria-label")).toBe("Machines");
+    expect(machines()).toEqual([
+      ["mac-studio", "Live · 2 sessions"],
+      ["gapicore", "Unreachable · last seen 10m ago · 2 sessions unavailable"],
+      ["pi-lab", "Never reached"],
+      ["idle-box", "Live · 0 sessions"],
+    ]);
+
+    // The registry sends a fresh snapshot when only a machine's reachability changed.
+    harness.emit("snapshot", {
+      type: "snapshot",
+      revision: 2,
+      sessions: [live, stale, liveAsk, staleAsk],
+      hosts: hosts.slice(0, 3),
+    });
+    expect(machines().map(([host]) => host)).toEqual(["mac-studio", "gapicore", "pi-lab"]);
+  });
+
+  test("lists every machine even when no session is live anywhere", async () => {
+    const harness = await bootApp({
+      permission: "denied",
+      suffix: "fleet-empty",
+      initialSessions: [],
+      initialHosts: [{ host: "gapicore", status: "stale", ageSeconds: 30 }],
+    });
+    expect(harness.elements.emptyState.hidden).toBeFalse();
+    expect(
+      harness.elements.sessionList.querySelectorAll(".host-row").map(row => row.querySelector(".host-state")?.textContent),
+    ).toEqual(["Unreachable · last seen <1m ago · no sessions"]);
+  });
+
+  test("asks for sign-in after an expired or denied identity instead of retrying blindly", async () => {
+    for (const [status, copy] of [
+      [401, "Your sign-in expired. Sign in again to continue."],
+      [403, "This identity is not authorized. Sign in with an allowed account."],
+    ] as const) {
+      const harness = await bootApp({
+        permission: "denied",
+        suffix: `sign-in-${status}`,
+        initialSessions: [session("sign-in-session-0001")],
+      });
+      const ajax = { "X-Requested-With": "XMLHttpRequest" };
+      const listInit = harness.fetchInits.find(entry => entry.path === "/api/v1/sessions")?.init;
+      expect(listInit?.headers).toEqual(ajax);
+      expect(listInit?.redirect).toBe("manual");
+      expect(harness.fetchInits.find(entry => entry.path === "/api/v1/push/config")?.init.headers).toEqual(ajax);
+
+      // Access ends the stream when the token expires; a native EventSource cannot carry the AJAX
+      // header, so the snapshot fetch is the probe that recognizes it.
+      harness.setList(2, [], status);
+      harness.disconnectEvents();
+      harness.runTimers();
+      await settleUntil(() => harness.elements.statusBanner.dataset.kind === "unauthorized", 100);
+      expect(harness.elements.statusBanner.textContent).toBe(copy);
+      expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(0);
+
+      const listReads = (): number => harness.fetchPaths.filter(path => path === "/api/v1/sessions").length;
+      const readsAtDenial = listReads();
+      harness.runTimers();
+      harness.setVisibility("hidden");
+      harness.setVisibility("visible");
+      await drainMicrotasks();
+      expect(listReads()).toBe(readsAtDenial);
+      expect(harness.reloads.count).toBe(0);
+
+      const signIn = harness.elements.statusBanner.querySelector(".status-action");
+      expect(signIn?.textContent).toBe("Sign in again");
+      signIn?.dispatchEvent(new Event("click"));
+      expect(harness.reloads.count).toBe(1);
+    }
+  });
+
+  test("a reload never reopens a remembered session that ended, restarted, became unreachable, or lost Control", async () => {
+    const standaloneId = "resume-standalone-0001";
+    const fleetId = "e".repeat(64);
+    for (const [name, instanceId, current, copy, kept] of [
+      ["ended", standaloneId, [], "Your last session has ended. Choose a current session.", false],
+      [
+        "restarted",
+        standaloneId,
+        [session(standaloneId, { generation: 2 })],
+        "Your last session restarted, so it was not reopened. Choose a current session.",
+        false,
+      ],
+      [
+        "unreachable",
+        fleetId,
+        [fleetSession("e", "gapicore", "stale")],
+        "gapicore is unreachable, so your last session was not reopened.",
+        true,
+      ],
+      [
+        "control-lost",
+        standaloneId,
+        [session(standaloneId, { canControl: false })],
+        "Control is no longer available for your last session.",
+        false,
+      ],
+    ] as const) {
+      const storage = new FakeStorage();
+      storage.setItem(ACTIVE_SELECTION_KEY, rememberedSelection(instanceId));
+      const harness = await bootApp({
+        permission: "denied",
+        suffix: `resume-refused-${name}`,
+        initialSessions: current,
+        storage,
+      });
+      await settleUntil(() => harness.elements.statusBanner.dataset.kind === "expired", 100);
+      expect(harness.elements.statusBanner.textContent).toBe(copy);
+      expect(harness.fetchPaths.some(path => path.endsWith("/launch"))).toBeFalse();
+      // Only an unreachable machine may come back with the same session; nothing else is retried.
+      expect(storage.getItem(ACTIVE_SELECTION_KEY)).toBe(kept ? rememberedSelection(instanceId) : null);
+      harness.emit("keepalive", { type: "keepalive", revision: 1 });
+      expect(harness.elements.statusBanner.dataset.kind).toBe("expired");
+      harness.runTimers();
+      await drainMicrotasks();
+      expect(harness.fetchPaths.some(path => path.endsWith("/launch"))).toBeFalse();
+    }
+  });
+
+  test("discards a remembered selection that is malformed, oversized, or carries anything beyond metadata", async () => {
+    const instanceId = "resume-sanitized-0001";
+    for (const [name, stored] of [
+      ["capability", rememberedSelection(instanceId, { capability: "SYNTHETIC_CAPABILITY_CANARY" })],
+      ["title", rememberedSelection(instanceId, { title: "PROMPT_CONTENT_CANARY" })],
+      ["oversized", rememberedSelection(instanceId, { pad: "x".repeat(300) })],
+      ["mode", JSON.stringify({ version: 1, instanceId, generation: 1, mode: "admin" })],
+      ["generation", JSON.stringify({ version: 1, instanceId, generation: 0, mode: "control" })],
+      ["version", JSON.stringify({ version: 2, instanceId, generation: 1, mode: "control" })],
+      ["json", "{not json"],
+    ] as const) {
+      const storage = new FakeStorage();
+      storage.setItem(ACTIVE_SELECTION_KEY, stored);
+      const harness = await bootApp({
+        permission: "denied",
+        suffix: `resume-sanitized-${name}`,
+        initialSessions: [session(instanceId)],
+        storage,
+      });
+      await drainMicrotasks();
+      expect(storage.getItem(ACTIVE_SELECTION_KEY)).toBeNull();
+      // An accepted record would have started a launch, which this harness reports as a failed start.
+      expect(harness.elements.statusBanner.dataset.kind).toBe("ready");
+    }
+  });
+
+  test("an alert for a session on an unreachable machine opens nothing", async () => {
+    const unreachable = fleetSession("f", "gapicore", "stale", { inputRequired: true });
+    const harness = await bootApp({
+      permission: "denied",
+      pathname: `/collab/${unreachable.instanceId}`,
+      search: `?request=${unreachable.ask!.requestId}`,
+      suffix: "fleet-alert-unreachable",
+      initialSessions: [unreachable],
+    });
+    expect(harness.elements.statusBanner.dataset.kind).toBe("expired");
+    expect(harness.fetchPaths.some(path => path.endsWith("/launch"))).toBeFalse();
+  });
+
+  const liveEmbedState = (phase: CollabEmbedState["phase"] = "live"): CollabEmbedState => ({
+    phase,
+    endedReason: null,
+    requestPending: false,
+    responsePending: false,
+    gatewayHealth: { state: "healthy", rttMs: 12, lastSuccessAt: 1, failureSince: null, retryAt: null },
+    relayHealth: { state: "healthy", rttMs: 12, lastSuccessAt: 1, failureSince: null, retryAt: null },
+  });
+
+  async function openControl(harness: BrowserHarness, current: SessionMetadata): Promise<FakeElement> {
+    harness.elements.sessionList.querySelector(".working-row")?.dispatchEvent(new Event("click"));
+    await settleUntil(() => harness.body.querySelector(".triage-bar") !== null, 100);
+    harness.setEmbedState(liveEmbedState());
+    expect(harness.localStorage.getItem(ACTIVE_SELECTION_KEY)).toBe(rememberedSelection(current.instanceId));
+    const triage = harness.body.querySelector(".triage-bar");
+    if (triage === null) throw new Error("collaboration shell did not mount");
+    return triage;
+  }
+
+  test("a superseded failed launch settles only itself and keeps the newer remembered selection", async () => {
+    const current = session("selection-current-01");
+    const harness = await bootApp({
+      permission: "denied",
+      suffix: "stale-failed-launch",
+      initialSessions: [current],
+      launchStatus: 409,
+    });
+    const storage = harness.localStorage;
+    storage.setItem(ACTIVE_SELECTION_KEY, rememberedSelection("selection-newer-0001", { generation: 4 }));
+    const remembered = storage.getItem(ACTIVE_SELECTION_KEY);
+    const release = harness.holdNextLaunch();
+    harness.elements.sessionList.querySelector(".working-row")?.dispatchEvent(new Event("click"));
+    await settleUntil(() => harness.fetchPaths.some(path => path.endsWith("/launch")), 100);
+    harness.body.querySelector(".shell-back")?.dispatchEvent(new Event("click"));
+    await release;
+    await drainMicrotasks();
+
+    expect(storage.getItem(ACTIVE_SELECTION_KEY)).toBe(remembered);
+    expect(harness.body.querySelector(".triage-bar")?.dataset.kind).not.toBe("reconnecting");
+    expect(harness.reloads.count).toBe(0);
+  });
+
+  test("an expired identity while a session is open keeps sign-in in that shell", async () => {
+    const current = session("open-auth-expiry-001");
+    const harness = await bootApp({
+      permission: "denied",
+      suffix: "open-auth-expiry",
+      initialSessions: [current],
+      launchStatus: 200,
+    });
+    await openControl(harness, current);
+    harness.setList(2, [], 401);
+    harness.disconnectEvents();
+    harness.runTimers();
+    await settleUntil(() => harness.body.querySelector(".triage-bar")?.dataset.kind === "signin", 100);
+
+    const triage = harness.body.querySelector(".triage-bar");
+    expect(triage?.querySelector(".triage-copy")?.textContent).toBe(
+      "Your sign-in expired. Sign in again to continue.",
+    );
+    expect(triage?.querySelector(".triage-action")?.textContent).toBe("Sign in again");
+    expect(harness.elements.statusBanner.querySelector(".status-action")).toBeNull();
+    expect(harness.body.className).toBe("collab-shell-active");
+  });
+
+  test("a sign-in action survives a buffered keepalive and the next connection tick", async () => {
+    const current = session("signin-keepalive-001");
+    const harness = await bootApp({
+      permission: "denied",
+      suffix: "signin-survives-keepalive",
+      initialSessions: [current],
+      launchStatus: 200,
+    });
+    const triage = await openControl(harness, current);
+    const degraded: CollabEmbedState = {
+      ...liveEmbedState("reconnecting"),
+      gatewayHealth: { state: "unreachable", rttMs: null, lastSuccessAt: null, failureSince: 1, retryAt: Date.now() + 1_000 },
+    };
+    harness.setEmbedState(degraded);
+    harness.advanceClock(3_000);
+    harness.runTimers();
+    expect(triage.dataset.kind).toBe("reconnecting");
+
+    harness.setList(2, [], 401);
+    harness.disconnectEvents();
+    harness.runTimers();
+    await settleUntil(() => triage.dataset.kind === "signin", 100);
+    const before = triage.querySelector(".triage-action");
+    expect(before?.textContent).toBe("Sign in again");
+
+    const readsAtDenial = harness.fetchPaths.filter(path => path === "/api/v1/sessions").length;
+    harness.emit("keepalive", { type: "keepalive", revision: 2 });
+    harness.setEmbedState(liveEmbedState());
+    harness.runTimers();
+    await drainMicrotasks();
+
+    expect(triage.dataset.kind).toBe("signin");
+    expect(triage.hidden).toBeFalse();
+    expect(triage.querySelector(".triage-action")).toBe(before);
+    expect(harness.fetchPaths.filter(path => path === "/api/v1/sessions").length).toBe(readsAtDenial);
+    before?.dispatchEvent(new Event("click"));
+    expect(harness.reloads.count).toBe(1);
+  });
+
+  test("an unreachable fleet directory is not presented as a healthy empty list", async () => {
+    const stale = fleetSession("a", "gapicore", "stale", { title: "Offline build" });
+    const hosts = [{ host: "gapicore", status: "stale", ageSeconds: 90 }] as const satisfies readonly FleetHostSummary[];
+    const harness = await bootApp({
+      permission: "denied",
+      suffix: "fleet-directory-unreachable",
+      initialSessions: [],
+      initialHosts: [],
+      initialFleetStatus: "unreachable",
+    });
+    expect(harness.elements.emptyState.hidden).toBeFalse();
+    expect(harness.elements.statusBanner.dataset.kind).toBe("gateway");
+    expect(harness.elements.statusBanner.textContent).toBe(
+      "Fleet directory unavailable. Machine status may be incomplete.",
+    );
+    expect(harness.elements.sessionList.querySelector(".host-summary")?.dataset.fleetStatus).toBe("unreachable");
+
+    harness.setList(2, [stale], 200, hosts, "unreachable");
+    harness.emit("snapshot", {
+      type: "snapshot",
+      revision: 2,
+      sessions: [stale],
+      hosts,
+      fleetStatus: "unreachable",
+    });
+    expect(harness.elements.sessionList.querySelector(".working-row")?.dataset.instanceId).toBe(stale.instanceId);
+    expect(harness.elements.sessionList.querySelector(".host-row")?.querySelector(".host-name")?.textContent).toBe("gapicore");
+    expect(harness.elements.sessionList.querySelector(".host-row")?.dataset.status).toBe("stale");
+    expect(harness.elements.statusBanner.dataset.kind).toBe("gateway");
   });
 });
 

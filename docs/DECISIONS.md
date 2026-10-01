@@ -1014,3 +1014,37 @@ tunnel (`openjdk@17`), and TestingBot's open-source plan. A TestingBot outage, o
 within ten minutes, fails the lane and holds the release, as a Pixel failure does. Replacing the vendor
 means replacing the tunnel launch and the record audit; the journeys are standard WebDriver. iPhone
 and iPad enter the qualified matrix only from a passed campaign on the exact signed candidate.
+
+---
+
+## ADR-033 — Add a private flosrn Access-authenticated fleet variant
+
+**Status:** Accepted for this private fork; deployment qualification pending
+
+**Decision:** Keep the upstream Serve path fail-closed and add an explicit `cloudflare-access`
+authenticator for the loopback origin at `omp.shipmate.bot`. Verify RS256 application assertions
+against the pinned HTTPS team issuer/JWKS origin and audience, then apply the exact human email
+allowlist. Do not treat convenience identity headers or service tokens as browser identity.
+Authenticate assets too, retain mutation Origin checks, and bound SSE by its captured verified
+expiry, checked offline on keepalive without another JWKS fetch. Revalidate launch authorization
+before capability reveal. Do not claim Access revocation introspection or guest eviction:
+an existing collaboration capability remains valid until OMP revokes the room.
+
+Reuse HarnessOS's fleet directory and existing generation-bound Control broker through a private
+gateway-only socket and separate bearer, not its privileged owner/admin socket. The Gateway process
+must be isolated from Hub administrative credentials and listeners before deployment. Directory
+identity is SHA-256(`host + "\0" + native instanceId`), with generation still required at launch;
+metadata-only host summaries preserve unavailable and empty machines. Refuse View rather than
+silently returning Control. Push routes by that host-qualified metadata identity.
+
+Make Control the primary available action. Persist only a versioned instance/generation/mode
+selection, not a capability, title, path or transcript. Reload/foreground resume fetch fresh auth
+and metadata and relaunch only the exact generation; explicit Back clears intent. Delayed async
+work cannot override a later user selection. This is recovery from suspension, not a promise that
+iOS keeps the page alive in the background.
+
+**Consequences:** HarnessOS owns the full fork source pin, immutable release, dedicated gapicore
+unit/connector and Phase secrets. No OMP engine or relay changes are needed. Local Chrome mobile
+viewport observations are Tested only; upstream release and physical-device qualification does
+not transfer to this Access/federation variant.
+

@@ -63,20 +63,64 @@ const MUTATIONS: readonly Mutation[] = [
     mustFail: "fails closed for missing, disallowed, forged remote, and tagged-style identities",
   },
   {
-    name: "identity allowlist not consulted",
+    name: "Tailscale identity allowlist not consulted",
     file: "apps/gateway/src/auth.ts",
-    find: "if (login === undefined || !config.auth.allowedLogins.includes(login)) {",
-    replace: "if (login === undefined) {",
+    find: `  const header = request.headers.get("Tailscale-User-Login");
+  if (header === null) return { allowed: false, reason: "unauthorized" };
+  const login = normalizeTailscaleLogin(header);
+  if (login === undefined || !config.auth.allowedLogins.includes(login)) {`,
+    replace: `  const header = request.headers.get("Tailscale-User-Login");
+  if (header === null) return { allowed: false, reason: "unauthorized" };
+  const login = normalizeTailscaleLogin(header);
+  if (login === undefined) {`,
     target: "apps/gateway/test/http.test.ts",
     mustFail: "fails closed for missing, disallowed, forged remote, and tagged-style identities",
   },
   {
+    name: "Access identity allowlist not consulted",
+    file: "apps/gateway/src/auth.ts",
+    find: `  const login = normalizeTailscaleLogin(identity.email);
+  if (login === undefined || !config.auth.allowedLogins.includes(login)) {
+    return { allowed: false, reason: "forbidden_identity" };
+  }`,
+    replace: `  const login = normalizeTailscaleLogin(identity.email);
+  if (login === undefined) {
+    return { allowed: false, reason: "forbidden_identity" };
+  }`,
+    target: "apps/gateway/test/access.test.ts",
+    mustFail: "refuses a valid token whose login is not allowlisted, and any non-loopback peer",
+  },
+  {
     name: "an admitted event stream never re-authorized",
     file: "apps/gateway/src/http.ts",
-    find: "if (!stillAuthorized()) {",
+    find: "if (!authorized) {",
     replace: "if (false) {",
     target: "apps/gateway/test/http.test.ts",
     mustFail: "an admitted stream stops when the topology stops justifying it",
+  },
+  {
+    name: "an admitted Access stream never re-authorized",
+    file: "apps/gateway/src/http.ts",
+    find: "if (!authorized) {",
+    replace: "if (false) {",
+    target: "apps/gateway/test/access.test.ts",
+    mustFail: "an admitted stream ends once the admitting token expires",
+  },
+  {
+    name: "service tokens accepted as a person's identity",
+    file: "apps/gateway/src/access.ts",
+    find: 'if ("common_name" in payload) return undefined;',
+    replace: "if (false) return undefined;",
+    target: "apps/gateway/test/access.test.ts",
+    mustFail: "refuses service-token and org tokens: only a person's app token is identity",
+  },
+  {
+    name: "org tokens accepted as a person's identity",
+    file: "apps/gateway/src/access.ts",
+    find: 'if (payload.type !== "app") return undefined;',
+    replace: "if (false) return undefined;",
+    target: "apps/gateway/test/access.test.ts",
+    mustFail: "refuses service-token and org tokens: only a person's app token is identity",
   },
   {
     name: "a superseded generation still authorizes a launch",

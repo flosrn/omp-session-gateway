@@ -157,6 +157,14 @@ export const RUNTIME_LICENSES: Readonly<Record<string, RuntimeLicenseMetadata>> 
     copyrightText: "Copyright (c) Isaac Z. Schlueter",
     licensePath: "licenses/runtime/inherits/LICENSE",
   },
+  jose: {
+    version: "6.2.12",
+    source: "https://github.com/panva/jose/tree/v6.2.12",
+    licenseDeclared: "MIT",
+    licenseConcluded: "MIT",
+    copyrightText: "Copyright (c) 2018 Filip Skokan",
+    licensePath: "licenses/runtime/jose/LICENSE",
+  },
   jwa: {
     version: "2.0.1",
     source: "https://github.com/brianloveswords/node-jwa/tree/2.0.1",

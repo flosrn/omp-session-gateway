@@ -1,5 +1,15 @@
 # Release status
 
+## Private flosrn mobile fleet variant — implemented, unqualified
+
+The fork's Cloudflare Access authentication, HarnessOS federation, Control-first launch and
+metadata-only exact-generation resume do not inherit the upstream qualified baseline below.
+Local Chrome mobile-viewport observations are **Tested** only; see
+[fork evidence](COMPATIBILITY.md#private-flosrn-fork-evidence). Actual iPhone, live Web Push,
+production Access/tunnel readiness and Hako coexistence are not qualified for this variant.
+Process isolation and the private gateway-only bridge are required before deployment. The
+upstream published artifacts and their historical qualification below remain unchanged.
+
 ## Mainline v0.7.1 — published stable
 
 **Updated:** 2026-09-30. [v0.7.1](https://github.com/alphastorm/omp-session-gateway/releases/tag/v0.7.1)

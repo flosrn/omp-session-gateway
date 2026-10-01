@@ -611,6 +611,16 @@ h1 {
   color: var(--muted);
 }
 
+.row-host {
+  flex: 0 1 auto;
+  max-width: 30%;
+  color: var(--body);
+}
+
+.working-details .row-unavailable {
+  color: var(--danger-text);
+}
+
 .dismiss-session {
   display: inline-flex;
   flex: none;
@@ -731,6 +741,19 @@ h1 {
   box-shadow: 0 0 0 4px rgba(201, 155, 69, 0.09);
 }
 
+.row-dot-host-live {
+  background: var(--live);
+}
+
+.row-dot-unavailable,
+.row-dot-host-stale {
+  background: var(--danger);
+}
+
+.row-dot-host-never {
+  background: var(--faint);
+}
+
 .row-title {
   min-width: 0;
   overflow: hidden;
@@ -846,6 +869,52 @@ h1 {
 
 .dismissed-control button:hover {
   color: var(--ink);
+}
+
+/* ——— Fleet machines ——————————————————————————————————————————— */
+
+.host-summary {
+  margin-top: 0.4rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.host-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.host-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, auto) minmax(0, 1fr);
+  align-items: center;
+  gap: 0.6rem;
+  min-height: 2.25rem;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+}
+
+.host-name {
+  overflow: hidden;
+  color: var(--ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.host-state {
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.host-row[data-status="stale"] .host-state {
+  color: var(--danger-text);
 }
 
 /* ——— Local action toast ——————————————————————————————————————— */

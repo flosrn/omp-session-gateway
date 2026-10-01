@@ -13,7 +13,8 @@ import {
   parsePushSubscriptionRequest,
   parsePushUnsubscribeRequest,
 } from "@omp-session-gateway/protocol";
-import { authorizeHttpRequest, isLoopbackAddress, requestHasValidMutationContext, type RequestPeer } from "./auth.ts";
+import { createCloudflareAccessVerifier, type CloudflareAccessVerifier } from "./access.ts";
+import { authorizeHttpRequest, isLoopbackAddress, requestHasValidMutationContext, type AuthorizationResult, type RequestPeer } from "./auth.ts";
 import { createTailnetPresenceProbe } from "./tailnet.ts";
 import type { GatewayConfig } from "./config.ts";
 import { SafeLogger } from "./logger.ts";
@@ -102,6 +103,20 @@ function problem(status: number, code: string, message: string): Response {
     true,
   );
 }
+function authenticationRefusal(
+  mode: GatewayConfig["auth"]["mode"],
+  reason: Extract<AuthorizationResult, { allowed: false }>["reason"],
+  peer: RequestPeer | undefined,
+): Response {
+  if (mode !== "cloudflare-access") return problem(403, "forbidden", "Forbidden");
+  if (reason === "keys_unavailable") return problem(503, "retry_later", "Try again shortly");
+  // Missing, invalid, or expired assertions are the only Access refusals a new sign-in can fix.
+  // A non-loopback peer shares the `unauthorized` reason with those, but it is not one of them.
+  if (reason === "unauthorized" && peer !== undefined && isLoopbackAddress(peer.address)) {
+    return problem(401, "authentication_required", "Sign in again");
+  }
+  return problem(403, "forbidden", "Forbidden");
+}
 
 async function readBoundedBody(request: Request, maximumBytes: number): Promise<Uint8Array> {
   const declared = request.headers.get("Content-Length");
@@ -138,8 +153,10 @@ const SSE_KEEPALIVE_MS = 5_000;
 /**
  * @param stillAuthorized re-read on every keepalive. Authorization for this endpoint would otherwise
  * be evaluated once and never again, so a stream admitted while identity trust was sound would keep
- * delivering the session directory after the topology stopped justifying it. The keepalive is
- * already the stream's liveness tick, so this adds a predicate read rather than a timer.
+ * delivering the session directory after the topology stopped justifying it, or after the Access
+ * token that admitted it expired. The keepalive is already the stream's liveness tick, so this adds
+ * a check rather than a timer. An asynchronous check is never overlapped with the next tick, and a
+ * rejection counts as a refusal.
  *
  * Admission goes through `subscribeWithSnapshot` so the snapshot and the live subscription are one
  * step: a revision landing mid-handshake is replayed in order rather than lost, and teardown is
@@ -148,12 +165,13 @@ const SSE_KEEPALIVE_MS = 5_000;
 function eventStream(
   registry: SessionRegistry,
   keepaliveMs = SSE_KEEPALIVE_MS,
-  stillAuthorized: () => boolean = () => true,
+  stillAuthorized: () => boolean | Promise<boolean> = () => true,
 ): Response {
   const encoder = new TextEncoder();
   let unsubscribe: (() => void) | undefined;
   let keepalive: ReturnType<typeof setInterval> | undefined;
   let closed = false;
+  let checking = false;
   const release = (): void => {
     closed = true;
     unsubscribe?.();
@@ -184,17 +202,9 @@ function eventStream(
             release();
           }
         };
-        const dispose = registry.subscribeWithSnapshot(send);
-        // A stream abandoned during admission has no subscription handle to revoke yet, so revoke the
-        // one admission just returned instead of leaving the listener attached to the registry.
-        if (closed) {
-          dispose();
-          return;
-        }
-        unsubscribe = dispose;
-        keepalive = setInterval(() => {
+        const tick = (authorized: boolean): void => {
           if (closed) return;
-          if (!stillAuthorized()) {
+          if (!authorized) {
             close();
             return;
           }
@@ -207,6 +217,39 @@ function eventStream(
           } catch {
             release();
           }
+        };
+        const dispose = registry.subscribeWithSnapshot(send);
+        // A stream abandoned during admission has no subscription handle to revoke yet, so revoke the
+        // one admission just returned instead of leaving the listener attached to the registry.
+        if (closed) {
+          dispose();
+          return;
+        }
+        unsubscribe = dispose;
+        keepalive = setInterval(() => {
+          if (closed || checking) return;
+          let verdict: boolean | Promise<boolean>;
+          try {
+            verdict = stillAuthorized();
+          } catch {
+            close();
+            return;
+          }
+          if (typeof verdict === "boolean") {
+            tick(verdict);
+            return;
+          }
+          checking = true;
+          verdict.then(
+            authorized => {
+              checking = false;
+              tick(authorized);
+            },
+            () => {
+              checking = false;
+              tick(false);
+            },
+          );
         }, keepaliveMs);
       },
       cancel() {
@@ -250,6 +293,12 @@ export function createHttpHandler(options: {
    * TUN device. Injectable so tests can drive both topologies; the default measures the host.
    */
   readonly tailnetPresent?: () => boolean;
+  /**
+   * Verifies Cloudflare Access application tokens in `cloudflare-access` mode. Absent means the
+   * handler builds one from `config.auth.cloudflareAccess`, fetching keys from that team's pinned
+   * certs URL; tests inject one whose key transport is local.
+   */
+  readonly accessVerifier?: CloudflareAccessVerifier;
 }): (request: Request, peer?: RequestPeer) => Promise<Response> {
   const { config, registry, staticAssets, launchResolver } = options;
   const logger = options.logger ?? new SafeLogger();
@@ -259,6 +308,13 @@ export function createHttpHandler(options: {
   const limiter = new LaunchRateLimiter(20, 60_000, Math.max(2, identityCapacity * 2));
   const now = options.now ?? Date.now;
   const tailnetPresent = options.tailnetPresent ?? createTailnetPresenceProbe();
+  // Built once so the remote key set and its rotation cache are shared by every request.
+  const accessSettings = config.auth.cloudflareAccess;
+  const accessVerifier =
+    config.auth.mode !== "cloudflare-access"
+      ? undefined
+      : (options.accessVerifier ??
+        (accessSettings === undefined ? undefined : createCloudflareAccessVerifier({ ...accessSettings, now })));
   // `tailscale-serve` mode trusts an identity header from any loopback peer, which is only sound
   // while Serve is the sole way in. Configuration may declare that no tailnet reaches this host at
   // all, which is how a loopback-only harness exercises the production identity path with no
@@ -293,6 +349,17 @@ export function createHttpHandler(options: {
       if (peer === undefined || !isLoopbackAddress(peer.address)) {
         return problem(403, "forbidden", "Forbidden");
       }
+      // Behind a tunnel every public request is a loopback peer too. Readiness proofs are for the
+      // local CLI only, and a tunnel inserts these headers itself, so their presence marks a request
+      // that came from outside this host.
+      if (
+        config.auth.mode === "cloudflare-access" &&
+        ["Cf-Ray", "Cf-Connecting-Ip", "Cf-Access-Jwt-Assertion", "Cf-Visitor", "X-Forwarded-For"].some(
+          header => request.headers.get(header) !== null,
+        )
+      ) {
+        return problem(403, "forbidden", "Forbidden");
+      }
       const status = options.endpointHealthy?.() === false ? "degraded" : "ready";
       const challenge = request.headers.get("X-OMP-Readiness-Challenge");
       if (challenge === null) return withSecurityHeaders(Response.json({ status }), true);
@@ -325,20 +392,25 @@ export function createHttpHandler(options: {
         );
       }
     }
-    const authorization = authorizeHttpRequest(request, peer, config, serveOwnsIdentityHeaders);
+    const authorization = await authorizeHttpRequest(request, peer, config, serveOwnsIdentityHeaders, accessVerifier);
     if (!authorization.allowed) {
       logger.event("warn", "http.authorization_denied", {
         identity_untrustworthy: authorization.reason === "identity_untrustworthy",
+        keys_unavailable: authorization.reason === "keys_unavailable",
       });
-      return problem(403, "forbidden", "Forbidden");
+      return authenticationRefusal(config.auth.mode, authorization.reason, peer);
     }
     if (url.pathname === "/api/v1/sessions" && request.method === "GET") {
       return withSecurityHeaders(Response.json(registry.snapshot()), true);
     }
     if (url.pathname === "/api/v1/events" && request.method === "GET") {
-      // Re-read per keepalive: an admitted stream must not outlive the topology that justified it.
-      return eventStream(registry, options.sseKeepaliveMs, () =>
-        config.auth.mode !== "tailscale-serve" || identityTrustDeclared || tailnetPresent(),
+      // Re-checked per keepalive: an admitted stream must not outlive the topology that justified it,
+      // nor the Access token that admitted it.
+      const revalidate = authorization.revalidate;
+      return eventStream(
+        registry,
+        options.sseKeepaliveMs,
+        revalidate ?? (() => config.auth.mode !== "tailscale-serve" || identityTrustDeclared || tailnetPresent()),
       );
     }
     if (url.pathname === "/api/v1/push/config" && request.method === "GET" && options.pushService !== undefined) {
@@ -438,6 +510,17 @@ export function createHttpHandler(options: {
         return problem(409, "mode_unavailable", "Session no longer shares that access; refresh and try again");
       }
       if (resolution.status !== "ok") return problem(404, "not_found", "Session unavailable");
+      // The broker may have waited past the admitting token's expiry. Refuse before the capability
+      // is revealed; the refusal body must not contain it.
+      if (authorization.revalidate !== undefined) {
+        let stillAdmitted = false;
+        try {
+          stillAdmitted = await authorization.revalidate();
+        } catch {
+          stillAdmitted = false;
+        }
+        if (!stillAdmitted) return problem(401, "authentication_required", "Sign in again");
+      }
       const response = Response.json({
         mode: launchRequest.mode,
         generation: launchRequest.generation,

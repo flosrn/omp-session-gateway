@@ -22,6 +22,12 @@ import {
   parseSessionEvent,
   parseSessionListResponse,
   sessionMetadataFromObserved,
+  observedSessionFromFleet,
+  parseFleetBridgeSnapshot,
+  parseFleetLinkOutcome,
+  type SessionEvent,
+  type SessionListResponse,
+  type SessionMetadata,
 } from "../src/index.ts";
 
 const encoder = new TextEncoder();
@@ -428,4 +434,134 @@ describe("strict protocol validation", () => {
     ).toThrow(ProtocolValidationError);
   });
 
+});
+
+describe("fleet directory contract", () => {
+  const fleetId = "f".repeat(64);
+  const fleetCard: SessionMetadata = {
+    instanceId: fleetId,
+    generation: 3,
+    startedAt: "2026-10-01T00:00:00.000Z",
+    lastSeenAt: "2026-10-01T00:00:01.000Z",
+    canView: false,
+    canControl: true,
+    inputRequired: false,
+    busy: true,
+    host: "mac",
+    originalInstanceId: "native-1",
+    hostStatus: "live",
+    available: true,
+  };
+  const bridgeSession = {
+    instanceId: "native-1",
+    generation: 3,
+    sessionId: "s-1",
+    title: null,
+    pid: 10,
+    cwd: null,
+    model: null,
+    roomSince: 0,
+    state: "working",
+    guests: 0,
+    relayConnected: true,
+    tmuxSession: null,
+    canControl: true,
+  };
+  const bridgeHost = { host: "mac", source: "hub", status: "live", ageSeconds: 1, error: null, sessions: [bridgeSession] };
+
+  test("a fleet card round-trips with its host summary, and a stock list stays stock", () => {
+    const list: SessionListResponse = {
+      revision: 2,
+      sessions: [fleetCard],
+      hosts: [{ host: "mac", status: "live", ageSeconds: 1 }],
+    };
+    expect(parseSessionListResponse(list)).toEqual(list);
+    const event: SessionEvent = { type: "snapshot", ...list };
+    expect(parseSessionEvent(event)).toEqual(event);
+    expect(parseSessionListResponse({ revision: 0, sessions: [] })).not.toHaveProperty("hosts");
+  });
+
+  test("fleetStatus is optional, exact, and absent from a stock list", () => {
+    const unreachable = parseSessionListResponse({ revision: 1, sessions: [], hosts: [], fleetStatus: "unreachable" });
+    expect(unreachable.fleetStatus).toBe("unreachable");
+    expect(unreachable.hosts).toEqual([]);
+    const healthyEmpty = parseSessionListResponse({ revision: 2, sessions: [], hosts: [], fleetStatus: "ok" });
+    expect(healthyEmpty.fleetStatus).toBe("ok");
+    const legacy = parseSessionListResponse({ revision: 3, sessions: [], hosts: [{ host: "mac", status: "live", ageSeconds: 1 }] });
+    expect(legacy).not.toHaveProperty("fleetStatus");
+    const stock = parseSessionListResponse({ revision: 0, sessions: [] });
+    expect(stock).not.toHaveProperty("fleetStatus");
+    expect(stock).not.toHaveProperty("hosts");
+    const event = parseSessionEvent({ type: "snapshot", revision: 1, sessions: [], fleetStatus: "unreachable" });
+    expect(event).toEqual({ type: "snapshot", revision: 1, sessions: [], fleetStatus: "unreachable" });
+    for (const fleetStatus of ["pending", "down", "", null, 1]) {
+      expect(() => parseSessionListResponse({ revision: 1, sessions: [], fleetStatus })).toThrow(ProtocolValidationError);
+      expect(() => parseSessionEvent({ type: "snapshot", revision: 1, sessions: [], fleetStatus })).toThrow(ProtocolValidationError);
+    }
+    expect(() => parseSessionEvent({ type: "session_upsert", revision: 1, session: fleetCard, fleetStatus: "ok" })).toThrow(
+      ProtocolValidationError,
+    );
+  });
+
+  test.each([
+    ["partial fleet fields", { available: undefined }],
+    ["stale yet available", { hostStatus: "stale" }],
+    ["unavailable yet controllable", { hostStatus: "stale", available: false, busy: undefined }],
+    ["unavailable with activity", { hostStatus: "stale", available: false, canControl: false }],
+    ["fleet card offering View", { canView: true }],
+    ["native id as directory id", { instanceId: "native-instance-1" }],
+  ])("refuses a %s", (_label, change) => {
+    const card = JSON.parse(JSON.stringify({ ...fleetCard, ...change }));
+    expect(() => parseSessionListResponse({ revision: 1, sessions: [card] })).toThrow(ProtocolValidationError);
+  });
+
+  test("refuses a host summary that names a machine twice or ages a never-read one", () => {
+    const twice = [{ host: "mac", status: "live", ageSeconds: 1 }, { host: "mac", status: "stale", ageSeconds: 9 }];
+    expect(() => parseSessionListResponse({ revision: 1, sessions: [], hosts: twice })).toThrow(ProtocolValidationError);
+    expect(() =>
+      parseSessionListResponse({ revision: 1, sessions: [], hosts: [{ host: "mac", status: "never", ageSeconds: 4 }] }),
+    ).toThrow(ProtocolValidationError);
+  });
+
+  test("an unknown generation never becomes a launchable identity", () => {
+    const snapshot = parseFleetBridgeSnapshot({ hosts: [{ ...bridgeHost, sessions: [{ ...bridgeSession, generation: null }] }] });
+    expect(observedSessionFromFleet(snapshot.hosts[0]!, snapshot.hosts[0]!.sessions[0]!, fleetId)).toBeUndefined();
+    expect(() => parseFleetBridgeSnapshot({ hosts: [{ ...bridgeHost, sessions: [{ ...bridgeSession, generation: 0 }] }] }))
+      .toThrow(ProtocolValidationError);
+  });
+
+  test("Control comes only from the hub's explicit access on a live machine", () => {
+    const { canControl: _omitted, ...unreported } = bridgeSession;
+    const project = (status: string, session: object) => {
+      const snapshot = parseFleetBridgeSnapshot({ hosts: [{ ...bridgeHost, status, sessions: [session] }] });
+      return observedSessionFromFleet(snapshot.hosts[0]!, snapshot.hosts[0]!.sessions[0]!, fleetId);
+    };
+    expect(project("live", bridgeSession)).toMatchObject({ canControl: true, available: true, busy: true });
+    expect(project("live", unreported)).toMatchObject({ canControl: false });
+    const stale = project("stale", bridgeSession);
+    expect(stale).toMatchObject({ canControl: false, available: false, hostStatus: "stale" });
+    expect(stale).not.toHaveProperty("busy");
+    const metadata = sessionMetadataFromObserved(stale!, "2026-10-01T00:00:00.000Z").metadata;
+    expect(metadata).toMatchObject({ canView: false, canControl: false, available: false });
+  });
+
+  test.each([
+    ["foreign origin", `https://evil.example/#room.${"k".repeat(64)}`],
+    ["path", `https://my.omp.sh/x#room.${"k".repeat(64)}`],
+    ["credentials", `https://u:p@my.omp.sh/#room.${"k".repeat(64)}`],
+    ["short key", "https://my.omp.sh/#room.key"],
+    ["non-canonical spelling", `HTTPS://my.omp.sh/#room.${"k".repeat(64)}`],
+  ])("refuses a control link with a %s", (_label, url) => {
+    expect(() => parseFleetLinkOutcome({ url })).toThrow(ProtocolValidationError);
+  });
+
+  test("wraps a hosted control link and keeps bridge error codes exact", () => {
+    const url = `https://my.omp.sh/#room.${"k".repeat(64)}`;
+    const outcome = parseFleetLinkOutcome({ url });
+    if (!outcome.ok) throw new Error("expected a link");
+    expect(outcome.capability).toBeInstanceOf(SecretCapability);
+    expect(outcome.capability.reveal()).toBe(url);
+    expect(parseFleetLinkOutcome({ error: "stale-generation" })).toEqual({ ok: false, error: "stale-generation" });
+    expect(() => parseFleetLinkOutcome({ error: "stale-generation", url })).toThrow(ProtocolValidationError);
+  });
 });
