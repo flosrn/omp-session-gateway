@@ -1540,6 +1540,52 @@ body.collab-shell-active {
   line-height: 1.5;
 }
 
+.quick-replies-field {
+  display: block;
+  margin: 0 0 0.5rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+/* 16px keeps iOS from zooming the sheet when the field takes focus. */
+.quick-replies-input {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  min-height: 7.5rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  color: var(--ink);
+  background: var(--surface);
+  font: 400 1rem / 1.45 var(--font-mono);
+  resize: vertical;
+}
+
+.quick-replies-input:focus-visible {
+  border-color: var(--control);
+  outline: none;
+}
+
+.quick-replies-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.quick-replies-reset {
+  flex: none;
+  min-height: 2.75rem;
+  padding: 0.5rem 0.65rem;
+  border: 0;
+  color: var(--control);
+  background: none;
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
 .sheet-build {
   margin: 1.4rem 0 0;
   padding-top: 0.8rem;

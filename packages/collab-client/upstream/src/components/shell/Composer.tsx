@@ -15,6 +15,18 @@ export interface ComposerProps {
 	client: GuestClient;
 	snapshot: GuestSnapshot;
 	embedded?: boolean;
+	/** Host-supplied one-tap prompts (embed option `quickReplies`). */
+	quickReplies?: readonly string[];
+}
+
+/**
+ * Quick replies exist only for a controlling guest with no pending ask: View is read-only, and an
+ * ask is answered through its own controls. While the session is not live, or a photo prompt is
+ * still awaiting its echo, the row stays in place but cannot send.
+ */
+export function quickReplyState(snapshot: GuestSnapshot, photoSendPending: boolean): "hidden" | "disabled" | "ready" {
+	if (snapshot.readOnly || snapshot.uiRequest !== null) return "hidden";
+	return snapshot.phase === "live" && !photoSendPending ? "ready" : "disabled";
 }
 
 /** Textarea metrics: line-height 20px + 8px vertical padding × 2 (kept in sync with shell.css). */
@@ -265,7 +277,7 @@ function SelectAsk({ client, disabled, embedded, recommendedIndex, request, send
 	);
 }
 
-export function Composer({ client, snapshot, embedded = false }: ComposerProps): ReactNode {
+export function Composer({ client, snapshot, embedded = false, quickReplies = [] }: ComposerProps): ReactNode {
 	const [text, setText] = useState("");
 	const [photos, setPhotos] = useState<readonly PreparedPhoto[]>([]);
 	const [preparingPhoto, setPreparingPhoto] = useState(false);
@@ -289,6 +301,7 @@ export function Composer({ client, snapshot, embedded = false }: ComposerProps):
 	const busy = snapshot.working;
 	const queued = snapshot.state?.queuedMessageCount ?? 0;
 	const relayReady = snapshot.relayHealth.state === "healthy";
+	const quickReplyRow = quickReplyState(snapshot, pendingPhotoPrompt !== null);
 	const retryReady = pendingPhotoPrompt !== null && photoConfirmationExpired && relayReady;
 	const hasDraft = text.trim().length > 0 || photos.length > 0;
 	const canSend =
@@ -571,6 +584,26 @@ export function Composer({ client, snapshot, embedded = false }: ComposerProps):
 							</span>
 						</button>
 					</div>
+				</div>
+			)}
+			{quickReplyRow !== "hidden" && quickReplies.length > 0 && (
+				<div className="sh-quick-replies" role="group" aria-label="Quick replies">
+					{quickReplies.map(reply => (
+						<button
+							type="button"
+							key={reply}
+							className="sh-quick-reply"
+							disabled={quickReplyRow !== "ready"}
+							title={`send “${reply}”`}
+							onClick={() => {
+								if (quickReplyRow !== "ready") return;
+								setPhotoSourceOpen(false);
+								client.sendPrompt(reply);
+							}}
+						>
+							{reply}
+						</button>
+					))}
 				</div>
 			)}
 			<div className="sh-composer-inner">

@@ -24,5 +24,10 @@ export interface CollabEmbedOptions {
 	shellOwnsLifecycle?: boolean;
 	/** Host-owned header element the client fills with its session tools (context, agents). */
 	headerSlot?: HTMLElement;
+	/**
+	 * One-tap replies shown above the composer in Control mode, already bounded by the host. Each tap
+	 * sends its text as a prompt; an empty or absent list shows nothing. The client never stores them.
+	 */
+	quickReplies?: readonly string[];
 	onStateChange?(state: CollabEmbedState): void;
 }

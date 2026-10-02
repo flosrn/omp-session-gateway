@@ -110,6 +110,15 @@
           <label class="detail-option"><input type="radio" name="theme" value="light" /><span><strong>Light</strong></span></label>
         </fieldset>
       </section>
+      <section class="sheet-section" aria-labelledby="sheet-quick-replies-title">
+        <h3 id="sheet-quick-replies-title" class="sheet-section-title">Quick replies</h3>
+        <label class="quick-replies-field" for="quick-replies-input">One per line. In Control, tapping a reply above the composer sends it at once.</label>
+        <textarea id="quick-replies-input" class="quick-replies-input" rows="5" spellcheck="false" autocapitalize="off" aria-describedby="quick-replies-note"></textarea>
+        <div class="quick-replies-footer">
+          <p id="quick-replies-note" class="sheet-footnote">Up to 8 replies, 200 characters each. Stored on this device only.</p>
+          <button id="quick-replies-reset" class="quick-replies-reset" type="button">Restore defaults</button>
+        </div>
+      </section>
       <p class="sheet-build">Community project · not affiliated with OMP · build <code><!--ASSET_BUILD--></code></p>
     </dialog>
     <aside id="local-action-toast" class="local-action-toast" role="status" aria-live="polite" aria-atomic="true" hidden>

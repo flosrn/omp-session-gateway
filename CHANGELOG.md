@@ -29,6 +29,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - Switch sessions from inside an open session: tapping the title in the session bar opens a sheet
   of the other live sessions in directory order (needs-you first, then live work), each with its
   machine and working directory; unavailable rows stay visible but inert.
+- Add quick replies: in Control, a scrolling row of one-tap replies above the composer (default
+  `continue`, `oui`, `go`, `résume`) sends the reply as a prompt. Edit the list in Settings, one
+  per line (at most 8, 200 characters each); it is stored on the device and passed to the client
+  through the new `quickReplies` embed option. Never shown in View or while an Ask is pending.
 
 ### Changed
 

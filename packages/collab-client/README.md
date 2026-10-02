@@ -61,6 +61,13 @@ Removing, acknowledged sending, or leaving drops preview references; the normali
 follows ordinary OMP transcript and model-provider handling on the host. View links remain
 read-only at every mutating client method, and pointer capture protects mobile composer actions.
 
+The `quickReplies` embed option carries the host's one-tap replies as plain strings, already
+bounded by the gateway (at most 8, 200 characters each); the client never stores them. In Control
+they render as a horizontally scrolling chip row above the composer, and a tap sends the reply
+through the same `sendPrompt` path as the Send button without touching the typed draft. The row
+is absent in View and while an Ask holds the composer, and inert while the session is not live
+or a photo prompt awaits its echo.
+
 `upstream/UPSTREAM.json` records the exact source paths, package versions, Bun `1.4.0`, and local patch list.
 `upstream/LICENSE` preserves the upstream license. The build remains a narrow integration; it does not fork the
 collaboration protocol or transcript UI.

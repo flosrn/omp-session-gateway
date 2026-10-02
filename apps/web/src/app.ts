@@ -21,6 +21,13 @@ import type {
   CollabEmbedOptions,
   CollabEmbedState,
 } from "../../../packages/collab-client/upstream/src/embed-contract";
+import {
+  DEFAULT_QUICK_REPLIES,
+  parseQuickReplyLines,
+  readQuickReplies,
+  resetQuickReplies,
+  writeQuickReplies,
+} from "./quick-replies.ts";
 
 type PathHealth = CollabEmbedState["gatewayHealth"];
 
@@ -67,6 +74,8 @@ const localActionToastUndo = requiredElement<HTMLButtonElement>("#local-action-t
 const notificationDetailInputs = [
   ...document.querySelectorAll<HTMLInputElement>('input[name="notification-detail"]'),
 ];
+const quickRepliesInput = requiredElement<HTMLTextAreaElement>("#quick-replies-input");
+const quickRepliesReset = requiredElement<HTMLButtonElement>("#quick-replies-reset");
 
 /**
  * The theme preference the embedded OMP client already stores (`lib/theme.ts`), applied to the
@@ -107,6 +116,30 @@ for (const input of themeInputs) {
     applyThemePreference(preference);
   });
 }
+
+/** Quick replies live in this page's storage; a session receives them only as plain strings. */
+function quickReplyStorage(): Storage | undefined {
+  try {
+    return typeof localStorage === "undefined" ? undefined : localStorage;
+  } catch {
+    return undefined;
+  }
+}
+
+function showStoredQuickReplies(): void {
+  quickRepliesInput.value = readQuickReplies(quickReplyStorage()).join("\n");
+}
+
+showStoredQuickReplies();
+quickRepliesInput.addEventListener("input", () => {
+  writeQuickReplies(quickReplyStorage(), parseQuickReplyLines(quickRepliesInput.value));
+});
+quickRepliesReset.addEventListener("click", () => {
+  resetQuickReplies(quickReplyStorage());
+  quickRepliesInput.value = DEFAULT_QUICK_REPLIES.join("\n");
+});
+// Typing is saved as it happens; closing the sheet shows the list as it was stored.
+notificationSettings.addEventListener("close", showStoredQuickReplies);
 
 const EVENT_LIVENESS_TIMEOUT_MS = 12_000;
 const SNAPSHOT_TIMEOUT_MS = 4_000;
@@ -2425,6 +2458,7 @@ function enterCollabClient(
         focusPendingRequest: requestId !== undefined,
         shellOwnsLifecycle: true,
         headerSlot: tools,
+        quickReplies: readQuickReplies(quickReplyStorage()),
         onStateChange: updateConnection,
       },
     );

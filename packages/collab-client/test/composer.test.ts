@@ -1,6 +1,6 @@
 import type { AssistantMessage, ImageContent, SessionEntry } from "@oh-my-pi/pi-wire";
 import { describe, expect, test } from "bun:test";
-import { photoPromptAcknowledged } from "../upstream/src/components/shell/Composer";
+import { photoPromptAcknowledged, quickReplyState } from "../upstream/src/components/shell/Composer";
 import { recommendedOptionIndex } from "../upstream/src/components/shell/ask-recommendation";
 import type { ActiveTool, GuestSnapshot } from "../upstream/src/lib/client";
 
@@ -159,6 +159,25 @@ describe("photo prompt acknowledgements", () => {
         afterEntryId: null,
       }),
     ).toBeTrue();
+  });
+});
+
+describe("quick reply gating", () => {
+  const idle = { uiRequest: null, working: false };
+
+  test("offers the replies only to a controlling guest with no pending ask", () => {
+    expect(quickReplyState(snapshot(idle), false)).toBe("ready");
+    expect(quickReplyState(snapshot({ ...idle, working: true }), false)).toBe("ready");
+    expect(quickReplyState(snapshot({ ...idle, readOnly: true }), false)).toBe("hidden");
+    expect(quickReplyState(snapshot(), false)).toBe("hidden");
+    expect(quickReplyState(snapshot({ readOnly: true }), false)).toBe("hidden");
+  });
+
+  test("keeps the row in place but inert while the session is not live or a photo send is pending", () => {
+    for (const phase of ["connecting", "waiting", "reconnecting", "ended"] as const) {
+      expect(quickReplyState(snapshot({ ...idle, phase }), false)).toBe("disabled");
+    }
+    expect(quickReplyState(snapshot(idle), true)).toBe("disabled");
   });
 });
 

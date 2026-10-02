@@ -462,6 +462,59 @@
 		var(--shadow-card);
 }
 
+/* ---- quick replies: one-tap prompts above the composer (host embed option) ---- */
+.sh-quick-replies {
+	display: flex;
+	gap: 8px;
+	max-width: 880px;
+	margin: 0 auto 8px;
+	overflow-x: auto;
+	overscroll-behavior-x: contain;
+	scrollbar-width: none;
+	-webkit-overflow-scrolling: touch;
+}
+
+.sh-quick-replies::-webkit-scrollbar {
+	display: none;
+}
+
+.sh-quick-reply {
+	flex: none;
+	max-width: 16rem;
+	min-height: 44px;
+	padding: 0 14px;
+	overflow: hidden;
+	font: 500 13px / 1 var(--font-ui);
+	color: var(--fg);
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	background: var(--bg-raised);
+	border: 1px solid var(--border-strong);
+	border-radius: 999px;
+	cursor: pointer;
+	transition:
+		border-color 120ms ease-out,
+		background 120ms ease-out;
+}
+
+.sh-quick-reply:hover:not(:disabled) {
+	border-color: var(--accent);
+}
+
+.sh-quick-reply:active:not(:disabled) {
+	background: var(--accent-muted);
+}
+
+.sh-quick-reply:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 1px;
+}
+
+.sh-quick-reply:disabled {
+	cursor: not-allowed;
+	opacity: 0.45;
+}
+
 .sh-photo-stage {
 	display: grid;
 	gap: 6px;

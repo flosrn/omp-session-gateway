@@ -34,6 +34,7 @@
     "Retain photo drafts until the host transcript acknowledges delivery and expose bounded retry",
     "Enforce view-link read-only state inside every mutating guest-client method",
     "Capture active composer pointers so status-row layout changes cannot cancel mobile actions",
+    "Render host-supplied quick replies (quickReplies embed option) as one-tap prompt chips above the Control composer, hidden in View and during an active Ask",
     "Keep the npm marked dependency instead of @oh-my-pi/pi-utils/marked so the bundled runtime closure stays pure JavaScript",
     "Vendor the pure math delimiter grammar instead of adding @oh-my-pi/pi-utils and its native dependency closure",
     "Render upstream LaTeX delimiters through CSP-safe native MathML without KaTeX stylesheet or font assets",

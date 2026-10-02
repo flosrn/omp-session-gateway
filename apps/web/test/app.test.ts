@@ -4,6 +4,7 @@ import fc, { type AsyncCommand } from "fast-check";
 import type { CollabEmbedOptions, CollabEmbedState } from "../../../packages/collab-client/upstream/src/embed-contract";
 
 let embedStateSink: ((state: CollabEmbedState) => void) | undefined;
+let lastEmbedOptions: CollabEmbedOptions | undefined;
 /** Test seam imported by app.ts only when a launch fixture sets the collab module URL. */
 export function startCollabWithCapability(
   _container: HTMLElement,
@@ -12,6 +13,7 @@ export function startCollabWithCapability(
   options?: CollabEmbedOptions,
 ): () => void {
   embedStateSink = options?.onStateChange;
+  lastEmbedOptions = options;
   return () => {
     embedStateSink = undefined;
   };
@@ -319,6 +321,8 @@ interface BrowserHarness {
     readonly localActionToast: FakeElement;
     readonly localActionToastCopy: FakeElement;
     readonly localActionToastUndo: FakeElement;
+    readonly quickRepliesInput: FakeElement;
+    readonly quickRepliesReset: FakeElement;
   };
   disconnectEvents(): void;
   expireEventLiveness(): void;
@@ -439,6 +443,8 @@ async function bootApp(options: {
   directoryTitle.textContent = "Sessions";
   const directoryCount = new FakeElement("p");
   directoryCount.hidden = true;
+  const quickRepliesInput = new FakeElement("textarea");
+  const quickRepliesReset = new FakeElement("button");
   const bySelector: Record<string, FakeElement> = {
     "#session-list": sessionList,
     "#empty-state": emptyState,
@@ -456,6 +462,8 @@ async function bootApp(options: {
     "#notification-detail-options": notificationDetailOptions,
     "#network-recovery-help": networkRecoveryHelp,
     "#network-recovery-help-close": networkRecoveryHelpClose,
+    "#quick-replies-input": quickRepliesInput,
+    "#quick-replies-reset": quickRepliesReset,
     "link[data-omp-collab-styles]": new FakeElement("link"),
   };
   const document = new FakeDocument(bySelector, notificationDetailInputs);
@@ -690,6 +698,8 @@ async function bootApp(options: {
       localActionToast,
       localActionToastCopy,
       localActionToastUndo,
+      quickRepliesInput,
+      quickRepliesReset,
     },
     fetchPaths,
     fetchLocations,
@@ -2105,6 +2115,34 @@ describe("fleet directory, sign-in, and remembered selection", () => {
     expect(launches).toHaveLength(launchesBefore + 1);
     expect(launches.at(-1)?.path).toBe(`/api/v1/sessions/${older.instanceId}/launch`);
     expect(JSON.parse(String(launches.at(-1)?.init.body))).toEqual({ mode: "control", generation: 1 });
+  });
+
+  test("Settings edits the quick replies the next session receives", async () => {
+    const current = session("quick-replies-000001");
+    const harness = await bootApp({
+      permission: "denied",
+      suffix: "quick-replies",
+      initialSessions: [current],
+      launchStatus: 200,
+    });
+    const input = harness.elements.quickRepliesInput;
+    expect(input.value).toBe("continue\noui\ngo\nrésume");
+
+    input.value = "vas-y\n\n stop \nvas-y";
+    input.dispatchEvent(new Event("input"));
+    expect(harness.localStorage.getItem("omp.sessions.quick-replies.v1")).toBe(JSON.stringify(["vas-y", "stop"]));
+    // Closing the sheet shows the list as it was stored.
+    harness.elements.notificationSettings.dispatchEvent(new Event("close"));
+    expect(input.value).toBe("vas-y\nstop");
+
+    harness.elements.quickRepliesReset.dispatchEvent(new Event("click"));
+    expect(input.value).toBe("continue\noui\ngo\nrésume");
+    expect(harness.localStorage.getItem("omp.sessions.quick-replies.v1")).toBeNull();
+
+    input.value = "on y va";
+    input.dispatchEvent(new Event("input"));
+    await openControl(harness, current);
+    expect(lastEmbedOptions?.quickReplies).toEqual(["on y va"]);
   });
 
   test("an expired identity while a session is open keeps sign-in in that shell", async () => {

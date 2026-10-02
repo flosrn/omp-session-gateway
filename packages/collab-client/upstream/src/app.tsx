@@ -328,7 +328,7 @@ export function Session({ client, onLeave, onRejoin, embedOptions }: SessionProp
 						</div>
 					)}
 					{(!embedded || snap.uiRequest === null) && (
-						<Composer client={client} snapshot={snap} embedded={embedded} />
+						<Composer client={client} snapshot={snap} embedded={embedded} quickReplies={embedOptions?.quickReplies} />
 					)}
 				</section>
 				{railOpen && (
