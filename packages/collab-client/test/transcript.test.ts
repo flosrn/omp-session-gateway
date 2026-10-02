@@ -195,6 +195,23 @@ describe("transcript windowing", () => {
     expect(query(root, "tr-earlier")?.textContent).toBe("Show earlier · 250 more");
   });
 
+  test("mounts back to a search match older than the window and keeps it mounted after the search", async () => {
+    const entries = userEntries(1000);
+    const { root, render } = await mountTranscript(transcriptProps(entries, { revealIndex: 600 }));
+
+    expect(rowTexts(root)[0]).toContain("message 600");
+    expect(query(root, "tr-earlier")?.textContent).toBe("Show earlier · 600 more");
+
+    await render(transcriptProps(entries, { revealIndex: null }));
+    expect(rowTexts(root)[0]).toContain("message 600");
+    // A match already inside the window never shrinks or moves it.
+    await render(transcriptProps(entries, { revealIndex: 900 }));
+    expect(rowTexts(root)[0]).toContain("message 600");
+    // `Show earlier` continues from the revealed row rather than from the old tail window.
+    await click(query(root, "tr-earlier") as MiniElement);
+    expect(rowTexts(root)[0]).toContain("message 300");
+  });
+
   test("windows the compact agent-drawer transcript too", async () => {
     const { root } = await mountTranscript(transcriptProps(userEntries(200), { compact: true }));
 

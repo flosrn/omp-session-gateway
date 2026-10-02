@@ -33,6 +33,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
   `continue`, `oui`, `go`, `résume`) sends the reply as a prompt. Edit the list in Settings, one
   per line (at most 8, 200 characters each); it is stored on the device and passed to the client
   through the new `quickReplies` embed option. Never shown in View or while an Ask is pending.
+- Add transcript search to the session tools: matches are highlighted in the transcript with an
+  `n/m` counter and previous/next stepping that scrolls each match into view. It searches every
+  loaded entry and widens the `Show earlier` window when the oldest match is not yet rendered;
+  Escape closes and clears it.
 
 ### Changed
 

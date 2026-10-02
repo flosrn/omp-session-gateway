@@ -21,6 +21,8 @@ export interface TranscriptProps {
 	host?: ToolRenderHost;
 	/** Main connection phase; absent for the agent drawer's compact transcript. */
 	phase?: ConnectionPhase;
+	/** Oldest entry a search must see: the window widens to mount it, and stays widened afterwards. */
+	revealIndex?: number | null;
 }
 
 interface ScrollGeometry {
@@ -306,7 +308,7 @@ function transcriptWindowStart(
 }
 
 export function Transcript(props: TranscriptProps): ReactNode {
-	const { entries, stream, streamDone, activeTools, working, compact, host, suppressAskTool, phase } = props;
+	const { entries, stream, streamDone, activeTools, working, compact, host, suppressAskTool, phase, revealIndex } = props;
 
 	// Include results outside the visible window for retained host transcripts.
 	const results = useMemo(() => {
@@ -327,7 +329,14 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	// tail stays exact.
 	const [extraCount, setExtraCount] = useState(0);
 	const pinnedOldestRef = useRef<string | null>(null);
-	const start = transcriptWindowStart(entries, extraCount, pinnedOldestRef.current);
+	const tailStart = transcriptWindowStart(entries, extraCount, pinnedOldestRef.current);
+	const start = revealIndex != null && revealIndex < tailStart ? revealIndex : tailStart;
+	// Record a search reveal as ordinary expansion, so a later `Show earlier` tap continues from it.
+	useLayoutEffect(() => {
+		if (revealIndex == null) return;
+		const needed = entries.length - TRANSCRIPT_WINDOW - revealIndex;
+		if (needed > extraCount) setExtraCount(needed);
+	}, [revealIndex, entries.length, extraCount]);
 	const windowed = useMemo(() => (start === 0 ? entries : entries.slice(start)), [entries, start]);
 
 	// Upstream's row anchor also holds when the same commit appends live entries.

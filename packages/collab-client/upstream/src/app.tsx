@@ -6,6 +6,7 @@ import { AgentsPanel } from "./components/agents/AgentsPanel";
 import { Banners } from "./components/shell/Banners";
 import { Composer } from "./components/shell/Composer";
 import { EmbeddedHeaderTools, HeaderBar } from "./components/shell/HeaderBar";
+import { oldestMatchIndex, TranscriptSearchBar, useTranscriptSearch } from "./components/shell/TranscriptSearch";
 import { Toasts } from "./components/shell/Toasts";
 import { Transcript } from "./components/transcript/Transcript";
 import { GuestClient } from "./lib/client";
@@ -207,6 +208,22 @@ export function Session({ client, onLeave, onRejoin, embedOptions }: SessionProp
 	const [railOpen, setRailOpen] = useState(false);
 	const [selectedId, setSelectedId] = useState<string | null>(null);
 	const autoOpenedRef = useRef(false);
+	const [searchOpen, setSearchOpen] = useState(false);
+	const [searchQuery, setSearchQuery] = useState("");
+	// An element, not a ref: an Ask swaps the transcript container and the search must follow it.
+	const [transcriptElement, setTranscriptElement] = useState<HTMLDivElement | null>(null);
+	const needle = searchOpen ? searchQuery.trim() : "";
+	// Searches every entry the client holds; an older match widens the transcript window to it.
+	const revealIndex = useMemo(() => oldestMatchIndex(snap.entries, needle), [snap.entries, needle]);
+	const search = useTranscriptSearch(transcriptElement, needle);
+	const toggleSearch = useCallback(() => {
+		setSearchOpen(open => !open);
+		setSearchQuery("");
+	}, []);
+	const closeSearch = useCallback(() => {
+		setSearchOpen(false);
+		setSearchQuery("");
+	}, []);
 
 	const focusedRequestRef = useRef<number | null>(null);
 
@@ -289,7 +306,14 @@ export function Session({ client, onLeave, onRejoin, embedOptions }: SessionProp
 			)}
 			{headerSlot !== undefined &&
 				createPortal(
-					<EmbeddedHeaderTools snapshot={snap} subCount={subCount} railOpen={railOpen} onToggleRail={toggleRail} />,
+					<EmbeddedHeaderTools
+						snapshot={snap}
+						subCount={subCount}
+						railOpen={railOpen}
+						onToggleRail={toggleRail}
+						searchOpen={searchOpen}
+						onToggleSearch={toggleSearch}
+					/>,
 					headerSlot,
 				)}
 			<main className="sh-main">
@@ -298,9 +322,18 @@ export function Session({ client, onLeave, onRejoin, embedOptions }: SessionProp
 					data-rail={railOpen ? "true" : "false"}
 					data-embedded-ask={embedded && snap.uiRequest !== null ? "true" : "false"}
 				>
+					{searchOpen && (
+						<TranscriptSearchBar
+							query={searchQuery}
+							entryCount={snap.entries.length}
+							search={search}
+							onQuery={setSearchQuery}
+							onClose={closeSearch}
+						/>
+					)}
 					{embedded && snap.uiRequest !== null ? (
 						<div className="sh-embedded-body">
-							<div className="sh-transcript">
+							<div className="sh-transcript" ref={setTranscriptElement}>
 								<Transcript
 										entries={snap.entries}
 										stream={snap.stream}
@@ -310,12 +343,13 @@ export function Session({ client, onLeave, onRejoin, embedOptions }: SessionProp
 										host={toolHost}
 										phase={snap.phase}
 										suppressAskTool
+										revealIndex={revealIndex}
 									/>
 							</div>
 							<Composer client={client} snapshot={snap} embedded />
 						</div>
 					) : (
-						<div className="sh-transcript">
+						<div className="sh-transcript" ref={setTranscriptElement}>
 							<Transcript
 									entries={snap.entries}
 									stream={snap.stream}
@@ -324,6 +358,7 @@ export function Session({ client, onLeave, onRejoin, embedOptions }: SessionProp
 									working={snap.working}
 									host={toolHost}
 									phase={snap.phase}
+									revealIndex={revealIndex}
 								/>
 						</div>
 					)}

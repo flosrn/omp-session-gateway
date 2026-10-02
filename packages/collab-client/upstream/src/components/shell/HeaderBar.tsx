@@ -1,4 +1,4 @@
-import { LogOut, PanelRight } from "lucide-react";
+import { LogOut, PanelRight, Search } from "lucide-react";
 import type { ReactNode } from "react";
 import type { ConnectionPhase, GuestSnapshot } from "../../lib/client";
 import { fmtPercent, shortenPath } from "../../lib/format";
@@ -60,16 +60,45 @@ export function AgentsToggle({ subCount, railOpen, onToggleRail }: { subCount: n
 	);
 }
 
+export function SearchToggle({ searchOpen, onToggleSearch }: { searchOpen: boolean; onToggleSearch(): void }): ReactNode {
+	const label = searchOpen ? "close transcript search" : "search transcript";
+	return (
+		<button
+			type="button"
+			className={searchOpen ? "sh-btn sh-btn-icon sh-btn-on" : "sh-btn sh-btn-icon"}
+			onClick={onToggleSearch}
+			title={label}
+			aria-label={label}
+			aria-pressed={searchOpen}
+		>
+			<Search size={14} />
+		</button>
+	);
+}
+
+export interface EmbeddedHeaderToolsProps extends Omit<HeaderBarProps, "onLeave"> {
+	searchOpen: boolean;
+	onToggleSearch(): void;
+}
+
 /**
- * The session tools a host shell shows in its own bar when it embeds the client: context fill and
- * the agents toggle. Participants and the read-only chip stay out; the host bar owns title,
- * navigation and connection state.
+ * The session tools a host shell shows in its own bar when it embeds the client: context fill,
+ * transcript search and the agents toggle. Participants and the read-only chip stay out; the host
+ * bar owns title, navigation and connection state.
  */
-export function EmbeddedHeaderTools({ snapshot, subCount, railOpen, onToggleRail }: Omit<HeaderBarProps, "onLeave">): ReactNode {
+export function EmbeddedHeaderTools({
+	snapshot,
+	subCount,
+	railOpen,
+	onToggleRail,
+	searchOpen,
+	onToggleSearch,
+}: EmbeddedHeaderToolsProps): ReactNode {
 	const pct = contextPercent(snapshot);
 	return (
 		<>
 			{pct != null && <ContextGauge pct={pct} />}
+			<SearchToggle searchOpen={searchOpen} onToggleSearch={onToggleSearch} />
 			<AgentsToggle subCount={subCount} railOpen={railOpen} onToggleRail={onToggleRail} />
 		</>
 	);

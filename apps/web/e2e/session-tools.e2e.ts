@@ -265,3 +265,77 @@ test("quick replies send in one tap in Control, never in View or during an ask, 
     await fixture.stop();
   }
 });
+
+/** Rects of the active match and of the transcript viewport, read from the painted highlight. */
+function activeMatchGeometry(page: Page): Promise<{ text: string; top: number; bottom: number; viewTop: number; viewBottom: number } | null> {
+  return page.evaluate(() => {
+    const highlight = CSS.highlights.get("omp-search-active");
+    const view = document.querySelector(".tr-root")?.getBoundingClientRect();
+    const range = highlight === undefined ? undefined : [...highlight][0];
+    if (!(range instanceof Range) || view === undefined) return null;
+    const rect = range.getBoundingClientRect();
+    const row = range.startContainer.parentElement?.closest(".tr-row")?.textContent ?? "";
+    return { text: row, top: rect.top, bottom: rect.bottom, viewTop: view.top, viewBottom: view.bottom };
+  });
+}
+
+test("transcript search highlights matches across the windowed history and steps through them", async ({ page }) => {
+  const target = workingSession("search-session-00001", "Search build", "2026-07-21T11:00:00.000Z");
+  const fixture = await startDashboardFixture([target], { roomKey: ROOM_KEY });
+  const needles = new Set([5, 300, 390]);
+  const transcript = Array.from({ length: 400 }, (_, index) =>
+    needles.has(index) ? `Found the Needle at step ${index}` : `Routine step ${index}`,
+  );
+
+  try {
+    await installFakeCollab(page, transcript);
+    await page.goto(fixture.origin);
+    await page.getByRole("button", { name: "Control Search build" }).click();
+    await expect(page.locator(".tr-earlier")).toHaveText("Show earlier · 250 more");
+
+    const toggle = page.locator(".shell-tools").getByRole("button", { name: "search transcript" });
+    const toggleBox = await toggle.boundingBox();
+    expect(toggleBox?.height ?? 0).toBeGreaterThanOrEqual(44);
+    expect(toggleBox?.width ?? 0).toBeGreaterThanOrEqual(44);
+    await toggle.click();
+    const field = page.getByRole("searchbox", { name: "Search transcript" });
+    await expect(field).toBeFocused();
+    await expect(field).toHaveAttribute("placeholder", "Search 400 loaded entries");
+
+    // The oldest match sits outside the rendered window: the window widens to mount it.
+    await field.fill("needle");
+    const counter = page.locator(".sh-search-count");
+    await expect(counter).toHaveText("3/3");
+    await expect(page.locator(".tr-earlier")).toHaveText("Show earlier · 5 more");
+    expect(await page.evaluate(() => CSS.highlights.get("omp-search-match")?.size)).toBe(3);
+    expect((await activeMatchGeometry(page))?.text).toContain("step 390");
+
+    await field.press("Enter");
+    await expect(counter).toHaveText("2/3");
+    await page.getByRole("button", { name: "Previous match (older)" }).click();
+    await expect(counter).toHaveText("1/3");
+    const oldest = await activeMatchGeometry(page);
+    expect(oldest?.text).toContain("step 5");
+    expect(oldest!.top).toBeGreaterThanOrEqual(oldest!.viewTop);
+    expect(oldest!.bottom).toBeLessThanOrEqual(oldest!.viewBottom);
+    await expectNoHorizontalOverflow(page);
+    await page.screenshot({ path: `/tmp/omp-transcript-search-${test.info().project.name}.png` });
+
+    await page.getByRole("button", { name: "Next match (newer)" }).click();
+    await expect(counter).toHaveText("2/3");
+    expect((await activeMatchGeometry(page))?.text).toContain("step 300");
+
+    await field.fill("absent phrase");
+    await expect(counter).toHaveText("0/0");
+    await expect(page.getByRole("button", { name: "Next match (newer)" })).toBeDisabled();
+
+    await field.press("Escape");
+    await expect(field).toHaveCount(0);
+    expect(await page.evaluate(() => [CSS.highlights.has("omp-search-match"), CSS.highlights.has("omp-search-active")])).toEqual([false, false]);
+    // Reopening starts from an empty field.
+    await toggle.click();
+    await expect(page.getByRole("searchbox", { name: "Search transcript" })).toHaveValue("");
+  } finally {
+    await fixture.stop();
+  }
+});

@@ -41,6 +41,7 @@
     "Preserve upstream rejected-currency and half-streamed delimiter semantics across the retained npm marked parser",
     "Force the transcript to its tail when an initial or recovered connection becomes live without discarding transcript windowing",
     "Retain explicit Show earlier expansion, oldest-entry ID anchoring, and full-history tool-result pairing because gateway tests encode phone reading behavior across live appends and reconnects; combine upstream row-based prepend anchoring",
+    "Add embedded transcript search: a session-tools toggle opens a search field that highlights rendered matches through the CSS Custom Highlight API, steps newest-to-oldest with an n/m counter, and widens the transcript window to the oldest held matching entry",
     "Exclude OMP's pi artwork: omit OmpMark.tsx and its HeaderBar/ConnectScreen imports and rendering"
   ]
 }

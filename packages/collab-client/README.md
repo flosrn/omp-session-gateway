@@ -14,7 +14,7 @@ baseline; the two pins happen to name the same tag but move independently. See
 The local patch passes the capability directly into the root `App` component. The installed PWA
 mounts that component in its current document so Android standalone navigation does not depend on
 `window.opener`. Embedded gateway mode suppresses the client's own header, connect screen, and
-lifecycle overlays; its session tools (context gauge, agents toggle) render into the gateway bar
+lifecycle overlays; its session tools (context gauge, transcript search, agents toggle) render into the gateway bar
 through the `headerSlot` embed option, and the agents rail opens from that toggle. Transcript, tool
 cards, agent drill-down and the sole composer are retained, in OMP's own palette; an active Ask
 uses that composer rather than a duplicate shell control. OMP's
@@ -42,6 +42,14 @@ pairs tool results across the entire retained history. Initial and recovered `li
 still return the main transcript to its tail without discarding that window; the compact agent
 transcript remains independent. The `wait` renderer and the retained hub-family renderers
 (`hub`, `irc`, `job`, `await`, `poll`, `cancel_job`) support older host releases.
+
+Transcript search (embedded only) opens from the search tool in the gateway bar. It matches
+case-insensitively across every entry the client holds: when the oldest matching entry is older
+than the rendered window, the window widens to it and stays widened, like a `Show earlier` tap.
+Matches are counted and highlighted in the rendered text through the CSS Custom Highlight API,
+without rewriting React's DOM; text inside collapsed thinking or tool cards is not searched. The
+active match starts at the newest one and steps older (Enter, ↑) or newer (Shift+Enter, ↓) with
+an `n/m` counter, scrolling into view; Escape or the close button clears it.
 
 LaTeX delimiters render through KaTeX `0.18.5` as native MathML with `trust: false`; no KaTeX
 stylesheet, font URL, or remote asset is emitted. The browser bundle retains npm `marked`

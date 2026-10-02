@@ -515,6 +515,64 @@
 	opacity: 0.45;
 }
 
+/* ---- transcript search: compact field over the transcript (embedded session tools) ---- */
+.sh-search {
+	display: flex;
+	flex: none;
+	align-items: center;
+	gap: 2px;
+	width: 100%;
+	max-width: 900px;
+	padding: 6px 6px 6px 10px;
+	border-bottom: 1px solid var(--border);
+}
+
+.sh-search-input {
+	flex: 1;
+	min-width: 0;
+	height: 44px;
+	padding: 0 12px;
+	font: 400 16px / 1 var(--font-ui);
+	color: var(--fg);
+	background: var(--bg-inset);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius);
+}
+
+.sh-search-input::placeholder {
+	color: var(--fg-faint);
+}
+
+.sh-search-input:focus {
+	outline: none;
+	border-color: var(--ring);
+	box-shadow: 0 0 0 3px var(--ring-soft);
+}
+
+.sh-search-count {
+	flex: none;
+	min-width: 3.5em;
+	font: 400 12px / 1 var(--font-mono);
+	color: var(--fg-muted);
+	text-align: center;
+}
+
+.sh-search-step.sh-btn-icon {
+	flex: none;
+	width: 44px;
+	height: 44px;
+}
+
+::highlight(omp-search-match) {
+	color: var(--fg);
+	background-color: var(--accent-muted);
+}
+
+::highlight(omp-search-active) {
+	color: var(--accent-fg);
+	background-color: var(--accent);
+}
+
 .sh-photo-stage {
 	display: grid;
 	gap: 6px;
