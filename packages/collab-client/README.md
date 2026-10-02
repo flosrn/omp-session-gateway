@@ -13,9 +13,11 @@ baseline; the two pins happen to name the same tag but move independently. See
 
 The local patch passes the capability directly into the root `App` component. The installed PWA
 mounts that component in its current document so Android standalone navigation does not depend on
-`window.opener`. Embedded gateway mode suppresses the client's competing header, rail, connect
-screen, and lifecycle overlays while retaining its transcript, tool cards, agent drill-down, and
-sole composer; an active Ask uses that composer rather than a duplicate shell control. OMP's
+`window.opener`. Embedded gateway mode suppresses the client's own header, connect screen, and
+lifecycle overlays; its session tools (context gauge, agents toggle) render into the gateway bar
+through the `headerSlot` embed option, and the agents rail opens from that toggle. Transcript, tool
+cards, agent drill-down and the sole composer are retained, in OMP's own palette; an active Ask
+uses that composer rather than a duplicate shell control. OMP's
 π artwork is excluded: `OmpMark.tsx` is not vendored, and HeaderBar/ConnectScreen do not import or
 render it, and the web build rejects its SVG path if it re-enters the bundle. Capabilities remain
 in client memory, and leaving or reloading returns to the gateway
