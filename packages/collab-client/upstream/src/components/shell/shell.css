@@ -25,27 +25,9 @@
 		radial-gradient(50rem 26rem at 95% -12%, var(--ambient-b), transparent 70%);
 }
 
+/* Embedded under the gateway's bar: no client header row, OMP's own palette. */
 .sh-app[data-embedded="true"] {
 	grid-template-rows: minmax(0, 1fr);
-	--bg: var(--gateway-ground);
-	--panel: var(--gateway-raised);
-	--bg-raised: var(--gateway-raised);
-	--bg-inset: var(--gateway-ground);
-	--bg-overlay: var(--gateway-surface);
-	--fg: var(--gateway-ink);
-	--fg-muted: var(--gateway-body);
-	--fg-faint: var(--gateway-faint);
-	--accent: var(--gateway-live);
-	--accent-fg: var(--gateway-live-ink);
-	--accent-muted: color-mix(in srgb, var(--gateway-live) 8%, transparent);
-	--ok: var(--gateway-live);
-	--warn: var(--gateway-control);
-	--err: var(--gateway-danger);
-	--border: var(--gateway-border-subtle);
-	--border-strong: var(--gateway-border-strong);
-	--ring: var(--gateway-live);
-	background: var(--bg);
-	color: var(--fg);
 }
 
 .sh-main {
@@ -183,17 +165,6 @@
 	color: var(--fg-inverse);
 	background: color-mix(in srgb, var(--fg) 86%, transparent);
 	border-color: transparent;
-}
-
-/* Embedded primary actions retain the gateway's approved live/control palette. */
-.sh-app[data-embedded="true"] .sh-btn-primary {
-	color: var(--accent-fg);
-	background: var(--accent);
-}
-
-.sh-app[data-embedded="true"] .sh-btn-primary:hover:not(:disabled) {
-	color: var(--accent-fg);
-	background: color-mix(in srgb, var(--accent) 86%, transparent);
 }
 
 .sh-btn-stop {
@@ -709,16 +680,16 @@
 	margin-top: 6px;
 	padding: 16px;
 	padding-bottom: 16px;
-	border: 1px solid var(--gateway-border-strong);
-	border-radius: 10px;
-	background: color-mix(in srgb, var(--gateway-surface) 78%, var(--gateway-ground));
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-lg);
+	background: var(--bg-raised);
 }
 
 .sh-ask-kicker {
 	font: 500 10px / 1.4 var(--font-mono);
 	letter-spacing: 0.12em;
 	text-transform: uppercase;
-	color: var(--gateway-control);
+	color: var(--accent);
 }
 
 .sh-composer-ask-embedded .sh-ask-title,
@@ -741,14 +712,14 @@
 	align-items: center;
 	min-height: 44px;
 	padding: 8px 12px;
-	border-color: var(--gateway-border-strong);
-	border-radius: 8px;
+	border-color: var(--border-strong);
+	border-radius: var(--radius);
 	background: transparent;
 }
 
 .sh-composer-ask-embedded .sh-ask-option-checked {
-	border-color: var(--gateway-live);
-	background: color-mix(in srgb, var(--gateway-live) 5%, transparent);
+	border-color: var(--accent);
+	background: var(--accent-muted);
 }
 
 .sh-composer-ask-embedded .sh-ask-option-label {
@@ -763,24 +734,24 @@
 	width: 16px;
 	height: 16px;
 	flex: none;
-	border: 1px solid var(--gateway-muted);
+	border: 1px solid var(--fg-muted);
 	border-radius: 50%;
 	color: transparent;
 }
 
 .sh-composer-ask-embedded .sh-ask-option-checked .sh-ask-option-marker {
-	border-color: var(--gateway-live);
+	border-color: var(--accent);
 }
 
 .sh-ask-option-marker-dot {
 	width: 8px;
 	height: 8px;
 	border-radius: 50%;
-	background: var(--gateway-live);
+	background: var(--accent);
 }
 
 .sh-composer-ask-embedded .sh-ask-option-description {
-	color: var(--gateway-muted);
+	color: var(--fg-muted);
 }
 
 .sh-ask-send {

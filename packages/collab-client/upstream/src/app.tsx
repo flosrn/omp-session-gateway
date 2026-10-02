@@ -1,10 +1,11 @@
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { AgentDrawer } from "./components/agents/AgentDrawer";
 import { AgentsPanel } from "./components/agents/AgentsPanel";
 import { Banners } from "./components/shell/Banners";
 import { Composer } from "./components/shell/Composer";
-import { HeaderBar } from "./components/shell/HeaderBar";
+import { EmbeddedHeaderTools, HeaderBar } from "./components/shell/HeaderBar";
 import { Toasts } from "./components/shell/Toasts";
 import { Transcript } from "./components/transcript/Transcript";
 import { GuestClient } from "./lib/client";
@@ -256,14 +257,16 @@ export function Session({ client, onLeave, onRejoin, embedOptions }: SessionProp
 		[agentIds],
 	);
 
-	// The gateway shell is the complete mobile chrome. Its embedded client keeps
-	// agent drill-downs from transcript cards, but never opens a competing rail.
+	// Desktop opens the rail when the first subagent appears. Embedded in the mobile shell the rail
+	// overlays the transcript, so it opens only from the agents toggle in the host bar.
 	useEffect(() => {
 		if (!embedded && subCount > 0 && !autoOpenedRef.current) {
 			autoOpenedRef.current = true;
 			setRailOpen(true);
 		}
 	}, [embedded, subCount]);
+	const toggleRail = useCallback(() => setRailOpen(open => !open), []);
+	const headerSlot = embedded ? embedOptions?.headerSlot : undefined;
 
 	const title = snap.header?.title ?? snap.state?.sessionName ?? "session";
 	useEffect(() => {
@@ -280,14 +283,19 @@ export function Session({ client, onLeave, onRejoin, embedOptions }: SessionProp
 					snapshot={snap}
 					subCount={subCount}
 					railOpen={railOpen}
-					onToggleRail={() => setRailOpen(open => !open)}
+					onToggleRail={toggleRail}
 					onLeave={onLeave}
 				/>
 			)}
+			{headerSlot !== undefined &&
+				createPortal(
+					<EmbeddedHeaderTools snapshot={snap} subCount={subCount} railOpen={railOpen} onToggleRail={toggleRail} />,
+					headerSlot,
+				)}
 			<main className="sh-main">
 				<section
 					className="sh-panel"
-					data-rail={!embedded && railOpen ? "true" : "false"}
+					data-rail={railOpen ? "true" : "false"}
 					data-embedded-ask={embedded && snap.uiRequest !== null ? "true" : "false"}
 				>
 					{embedded && snap.uiRequest !== null ? (
@@ -323,7 +331,7 @@ export function Session({ client, onLeave, onRejoin, embedOptions }: SessionProp
 						<Composer client={client} snapshot={snap} embedded={embedded} />
 					)}
 				</section>
-				{!embedded && railOpen && (
+				{railOpen && (
 					<>
 						<div className="sh-rail-backdrop" onClick={() => setRailOpen(false)} />
 						<aside className="sh-rail">

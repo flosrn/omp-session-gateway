@@ -68,6 +68,46 @@ const notificationDetailInputs = [
   ...document.querySelectorAll<HTMLInputElement>('input[name="notification-detail"]'),
 ];
 
+/**
+ * The theme preference the embedded OMP client already stores (`lib/theme.ts`), applied to the
+ * directory too, so both surfaces switch together. "system" leaves `data-theme` to the system.
+ */
+const THEME_STORAGE_KEY = "omp-collab-theme";
+type ThemePreference = "system" | "light" | "dark";
+const darkScheme = window.matchMedia("(prefers-color-scheme: dark)");
+
+function readThemePreference(): ThemePreference {
+  try {
+    const stored = localStorage.getItem(THEME_STORAGE_KEY);
+    return stored === "light" || stored === "dark" ? stored : "system";
+  } catch {
+    return "system";
+  }
+}
+
+function applyThemePreference(preference: ThemePreference): void {
+  const resolved = preference === "system" ? (darkScheme.matches ? "dark" : "light") : preference;
+  document.documentElement.dataset.theme = resolved;
+  document.documentElement.style.colorScheme = resolved;
+  for (const input of themeInputs) input.checked = input.value === preference;
+}
+
+const themeInputs = [...document.querySelectorAll<HTMLInputElement>('input[name="theme"]')];
+applyThemePreference(readThemePreference());
+darkScheme.addEventListener("change", () => applyThemePreference(readThemePreference()));
+for (const input of themeInputs) {
+  input.addEventListener("change", () => {
+    if (!input.checked) return;
+    const preference: ThemePreference = input.value === "light" || input.value === "dark" ? input.value : "system";
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, preference);
+    } catch {
+      // Persistence is best-effort; the choice still applies to this page.
+    }
+    applyThemePreference(preference);
+  });
+}
+
 const EVENT_LIVENESS_TIMEOUT_MS = 12_000;
 const SNAPSHOT_TIMEOUT_MS = 4_000;
 const RECOVERY_SNAPSHOT_TIMEOUT_MS = 20_000;
@@ -1709,13 +1749,21 @@ function renderConnectionState(shell: ActiveCollabShell): void {
     clearConnectionTimers(shell);
     shell.answerShown = true;
     setConnectionState(shell.connectionChip, "offline", "Ended");
-    showTriageBar(
-      shell,
-      "ended",
-      sessionEndedCopy(state.endedReason),
-      "Back to Sessions",
-      returnToDirectory,
-    );
+    // The room ended but OMP did not exit, and the directory still lists this very session: its
+    // host can open a new room, so offer to rejoin rather than only to leave.
+    const current = sessions.get(shell.instanceId);
+    const exited = sessionEndedCopy(state.endedReason).includes("· exit");
+    const rejoinMode =
+      exited || current === undefined || current.generation !== shell.generation
+        ? undefined
+        : shell.mode === "control" && current.canControl
+          ? "control"
+          : primaryMode(current);
+    if (current !== undefined && rejoinMode !== undefined) {
+      showTriageBar(shell, "ended", "Session room closed", "Rejoin", () => void launch(current, rejoinMode));
+    } else {
+      showTriageBar(shell, "ended", sessionEndedCopy(state.endedReason), "Back to Sessions", returnToDirectory);
+    }
     return;
   }
 
@@ -2085,9 +2133,15 @@ function enterCollabClient(
   const back = document.createElement("button");
   back.type = "button";
   back.className = "shell-back";
-  back.textContent = "← Sessions";
+  back.textContent = "←";
+  back.setAttribute("aria-label", "Back to Sessions");
+  back.title = "Sessions";
   back.addEventListener("click", () => history.back());
+  const heading = document.createElement("span");
+  heading.className = "shell-heading";
   const title = createTextElement("span", "shell-title", sessionTitle(session));
+  heading.append(title);
+  if (session.cwdLabel) heading.append(createTextElement("span", "shell-cwd", session.cwdLabel));
   const control = document.createElement("button");
   control.type = "button";
   control.className = "shell-control";
@@ -2102,10 +2156,13 @@ function enterCollabClient(
   connection.setAttribute("role", "status");
   connection.setAttribute("aria-live", "polite");
   connection.setAttribute("aria-atomic", "true");
+  // The embedded client renders its session tools (context fill, agents toggle) into this slot.
+  const tools = document.createElement("span");
+  tools.className = "shell-tools";
   const shellActions = document.createElement("span");
   shellActions.className = "shell-actions";
-  shellActions.append(control, connection);
-  bar.append(back, title, shellActions);
+  shellActions.append(tools, control, connection);
+  bar.append(back, heading, shellActions);
 
   const container = document.createElement("div");
   container.id = "root";
@@ -2221,6 +2278,7 @@ function enterCollabClient(
       {
         focusPendingRequest: requestId !== undefined,
         shellOwnsLifecycle: true,
+        headerSlot: tools,
         onStateChange: updateConnection,
       },
     );

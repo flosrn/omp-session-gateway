@@ -1,35 +1,30 @@
-/* OMP Sessions — dark-first UI per BRANDING.md. No external requests: system
-   font stacks only (webfonts are README/banner-only). Selectors match the DOM
-   emitted by app.ts exactly; no script changes required.
+/* OMP Sessions — OMP's own design system. The build prepends the collab client's tokens.css, the
+   one file that holds raw colors, so the directory and the open session share one palette and
+   one light/dark switch (`data-theme` on <html>, else the system preference). The names below are
+   this stylesheet's roles mapped onto those tokens; none of them holds a color of its own.
 
-   Register: Stripe/Uber-grade restraint. Hierarchy comes from type + surface
-   steps, never decoration. One accent per state: emerald = live, amber =
-   needs-you/privileged, red = unauthorized. Spacing on a 4px grid. */
+   Hierarchy comes from type + surface steps, never decoration. One accent per state: green =
+   live, OMP pink = needs-you/privileged, red = unauthorized. Spacing on a 4px grid. */
 
 :root {
-  color-scheme: dark;
-  --ground: #060809;
-  --raised: #0b0e11;
-  --surface: #0e1319;
-  --surface-press: #131a22;
-  --border-subtle: #161c22;
-  --border: #1c232b;
-  --border-strong: #2a343e;
-  --ink: #e8ecef;
-  --body: #b6bec7;
-  --muted: #8a939d;
-  --faint: #5f6870;
-  --live: #31c48d;
-  --live-bright: #5fd9a9;
-  --control: #c99b45;
-  --control-bright: #d7aa54;
-  --control-border: #4a3b1e;
-  --control-wash: rgba(201, 155, 69, 0.06);
-  --danger: #c85045;
-  --danger-text: #e8a29a;
-  --danger-border: #3a2220;
-  --font-sans: system-ui, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
-  --font-mono: ui-monospace, "JetBrains Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --ground: var(--bg);
+  --raised: var(--panel);
+  --surface: var(--bg-raised);
+  --surface-press: var(--bg-overlay);
+  --border-subtle: var(--border);
+  --ink: var(--fg);
+  --body: var(--fg-muted);
+  --muted: var(--fg-muted);
+  --faint: var(--fg-faint);
+  --live-bright: color-mix(in srgb, var(--live) 70%, var(--fg));
+  --control: var(--accent);
+  --control-bright: color-mix(in srgb, var(--accent) 80%, var(--fg));
+  --control-border: color-mix(in srgb, var(--accent) 35%, transparent);
+  --control-wash: var(--accent-muted);
+  --danger: var(--err);
+  --danger-text: color-mix(in srgb, var(--err) 65%, var(--fg));
+  --danger-border: color-mix(in srgb, var(--err) 30%, transparent);
+  --font-sans: var(--font-ui);
   color: var(--ink);
   background: var(--ground);
   font-family: var(--font-sans);
@@ -131,6 +126,12 @@ p {
 
 .eyebrow svg {
   flex: none;
+  color: var(--ink);
+}
+
+/* Over the transcript on a phone the agents rail must stay legible: an opaque panel, not glass. */
+.gateway-shell .sh-rail {
+  background: var(--panel);
 }
 
 .settings-button {
@@ -375,7 +376,7 @@ h1 {
   border: 1px solid var(--border);
   border-radius: 0.75rem;
   background:
-    linear-gradient(180deg, rgba(201, 155, 69, 0.05), rgba(201, 155, 69, 0) 42%),
+    linear-gradient(180deg, var(--accent-muted), transparent 42%),
     var(--surface);
 }
 
@@ -436,7 +437,7 @@ h1 {
 }
 
 .action-request {
-  color: var(--raised);
+  color: var(--accent-fg);
   background: var(--control);
 }
 
@@ -445,7 +446,7 @@ h1 {
 }
 
 .action-request:active:not(:disabled) {
-  background: #b98d3e;
+  background: var(--control-bright);
 }
 
 .hero-alternatives {
@@ -660,7 +661,7 @@ h1 {
   overflow: hidden;
   border: 1px dashed var(--control-border);
   border-radius: 0.6rem;
-  background: rgba(201, 155, 69, 0.035);
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
 }
 
 .held-open {
@@ -694,7 +695,7 @@ h1 {
   border: 0;
   border-left: 1px dashed var(--control-border);
   color: var(--control);
-  background: rgba(201, 155, 69, 0.03);
+  background: color-mix(in srgb, var(--accent) 3%, transparent);
   font-size: 0.72rem;
   font-weight: 600;
   cursor: pointer;
@@ -713,7 +714,7 @@ h1 {
   border: 1px dashed var(--control-border);
   border-radius: 0.6rem;
   color: var(--control);
-  background: rgba(201, 155, 69, 0.04);
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
   font-size: 0.84rem;
   line-height: 1.45;
 }
@@ -738,7 +739,7 @@ h1 {
 
 .row-dot-held {
   background: var(--control);
-  box-shadow: 0 0 0 4px rgba(201, 155, 69, 0.09);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
 .row-dot-host-live {
@@ -792,7 +793,7 @@ h1 {
   width: 8px;
   height: 8px;
   margin-top: 0.42rem;
-  box-shadow: 0 0 0 5px rgba(49, 196, 141, 0.12);
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--live) 12%, transparent);
 }
 
 .all-clear-message {
@@ -936,8 +937,8 @@ h1 {
   border: 1px solid var(--border);
   border-radius: 0.75rem;
   color: var(--body);
-  background: #111619;
-  box-shadow: 0 1rem 3rem rgba(0, 0, 0, 0.55);
+  background: var(--bg-overlay);
+  box-shadow: var(--shadow-overlay);
   font-size: 0.78rem;
   line-height: 1.35;
 }
@@ -1048,16 +1049,20 @@ body.collab-shell-active {
   min-height: 0;
 }
 
+/* One bar for the open session, in OMP's glass header style: back, title over working directory,
+ * then the client's session tools (context, agents), Control and the connection state. */
 .shell-bar {
   z-index: 10;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 0.375rem;
-  min-height: calc(3rem + env(safe-area-inset-top));
-  padding: max(0.35rem, env(safe-area-inset-top)) 0.65rem 0.35rem;
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--surface);
+  gap: 0.25rem;
+  min-height: calc(var(--topbar-h) + env(safe-area-inset-top));
+  padding: max(0.25rem, env(safe-area-inset-top)) 0.5rem 0.25rem 0.25rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--glass);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
 }
 
 .shell-back,
@@ -1065,8 +1070,10 @@ body.collab-shell-active {
   min-height: 2.75rem;
   padding: 0.5rem 0.55rem;
   border: 0;
-  color: var(--body);
+  border-radius: var(--radius);
+  color: var(--fg-muted);
   background: none;
+  font: inherit;
   font-size: 0.78rem;
   font-weight: 600;
   cursor: pointer;
@@ -1074,7 +1081,41 @@ body.collab-shell-active {
 }
 
 .shell-back {
-  justify-self: start;
+  min-width: 2.75rem;
+  font-size: 1.05rem;
+  font-weight: 400;
+}
+
+.shell-back:hover,
+.shell-control:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
+
+.shell-heading {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 0.05rem;
+}
+
+.shell-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg);
+  font-size: 0.875rem;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-cwd {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-faint);
+  font: 400 0.7rem / 1.4 var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .shell-actions {
@@ -1085,21 +1126,18 @@ body.collab-shell-active {
   min-width: 0;
 }
 
-.shell-control {
-  color: var(--control);
+.shell-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
 }
 
-.shell-title {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--ink);
-  font-size: 0.82rem;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  justify-self: center;
-  max-width: min(42vw, 18rem);
-  text-align: center;
+.shell-tools:empty {
+  display: none;
+}
+
+.shell-control {
+  color: var(--accent);
 }
 
 .conn-chip {
@@ -1175,7 +1213,7 @@ body.collab-shell-active {
 
 .triage-bar[data-kind="hold"] {
   border-top-color: var(--control-border);
-  background: #15140f;
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
 }
 
 .triage-bar[data-kind="hold"] .triage-copy {
@@ -1214,7 +1252,7 @@ body.collab-shell-active {
 
 .triage-action-next {
   border-color: var(--control-border);
-  color: var(--raised);
+  color: var(--accent-fg);
   background: var(--control);
 }
 
@@ -1230,11 +1268,11 @@ body.collab-shell-active {
   border-radius: 0.9rem;
   color: var(--ink);
   background: var(--surface);
-  box-shadow: 0 -1rem 3rem rgba(0, 0, 0, 0.45);
+  box-shadow: var(--shadow-overlay);
 }
 
 .notification-sheet::backdrop {
-  background: rgba(0, 0, 0, 0.68);
+  background: var(--backdrop);
   backdrop-filter: blur(3px);
 }
 
@@ -1444,35 +1482,6 @@ body.collab-shell-active {
 
 /* ——— Responsive and motion ———————————————————————————————————— */
 
-@media (max-width: 35rem) {
-  .shell-bar {
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-areas:
-      "back actions"
-      "title title";
-    gap: 0 0.3rem;
-    padding-inline: 0.4rem;
-    padding-bottom: 0.45rem;
-  }
-
-  .shell-back {
-    grid-area: back;
-  }
-
-  .shell-actions {
-    grid-area: actions;
-  }
-
-  .shell-title {
-    grid-area: title;
-    justify-self: stretch;
-    max-width: none;
-    padding: 0 0.35rem 0.1rem;
-    font-size: 0.86rem;
-    text-align: left;
-  }
-}
-
 @media (max-width: 26rem) {
   main {
     width: min(100% - 1.5rem, 35rem);
@@ -1485,6 +1494,10 @@ body.collab-shell-active {
 
   .conn-chip {
     padding-inline: 0.35rem;
+  }
+
+  .shell-tools .sh-gauge-track {
+    display: none;
   }
 }
 

@@ -20,18 +20,65 @@ export interface HeaderBarProps {
 	onLeave(): void;
 }
 
+/** The context-window fill, from OMP's own percent or tokens over window; null when unknown. */
+export function contextPercent(snapshot: GuestSnapshot): number | null {
+	const usage = snapshot.state?.contextUsage;
+	if (!usage) return null;
+	return (
+		usage.percent ??
+		(usage.tokens != null && usage.contextWindow !== null && usage.contextWindow > 0
+			? (usage.tokens / usage.contextWindow) * 100
+			: null)
+	);
+}
+
+export function ContextGauge({ pct }: { pct: number }): ReactNode {
+	return (
+		<span className={pct > 80 ? "sh-gauge sh-gauge-warn" : "sh-gauge"} title={`context · ${fmtPercent(pct)}`}>
+			<span className="sh-gauge-track">
+				<span className="sh-gauge-fill" style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
+			</span>
+			<span className="sh-gauge-pct">{fmtPercent(pct)}</span>
+		</span>
+	);
+}
+
+export function AgentsToggle({ subCount, railOpen, onToggleRail }: { subCount: number; railOpen: boolean; onToggleRail(): void }): ReactNode {
+	const label = railOpen ? "hide agents" : subCount > 0 ? `show agents (${subCount})` : "show agents";
+	return (
+		<button
+			type="button"
+			className={railOpen ? "sh-btn sh-btn-icon sh-btn-on" : "sh-btn sh-btn-icon"}
+			onClick={onToggleRail}
+			title={label}
+			aria-label={label}
+			aria-pressed={railOpen}
+		>
+			<PanelRight size={14} />
+			{subCount > 0 && <span className="sh-badge">{subCount}</span>}
+		</button>
+	);
+}
+
+/**
+ * The session tools a host shell shows in its own bar when it embeds the client: context fill and
+ * the agents toggle. Participants and the read-only chip stay out; the host bar owns title,
+ * navigation and connection state.
+ */
+export function EmbeddedHeaderTools({ snapshot, subCount, railOpen, onToggleRail }: Omit<HeaderBarProps, "onLeave">): ReactNode {
+	const pct = contextPercent(snapshot);
+	return (
+		<>
+			{pct != null && <ContextGauge pct={pct} />}
+			<AgentsToggle subCount={subCount} railOpen={railOpen} onToggleRail={onToggleRail} />
+		</>
+	);
+}
+
 export function HeaderBar({ snapshot, subCount, railOpen, onToggleRail, onLeave }: HeaderBarProps): ReactNode {
 	const { header, state, phase, readOnly } = snapshot;
 	const title = header?.title ?? state?.sessionName ?? "session";
-	const usage = state?.contextUsage;
-	let pct: number | null = null;
-	if (usage) {
-		pct =
-			usage.percent ??
-			(usage.tokens != null && usage.contextWindow !== null && usage.contextWindow > 0
-				? (usage.tokens / usage.contextWindow) * 100
-				: null);
-	}
+	const pct = contextPercent(snapshot);
 
 	return (
 		<header className="sh-header">
@@ -60,17 +107,7 @@ export function HeaderBar({ snapshot, subCount, railOpen, onToggleRail, onLeave 
 				)}
 				{state?.model && <span className="sh-chip sh-chip-meta">{state.model.name}</span>}
 				{state?.thinkingLevel && <span className="sh-chip sh-chip-meta">{state.thinkingLevel}</span>}
-				{pct != null && (
-					<span
-						className={pct > 80 ? "sh-gauge sh-gauge-warn" : "sh-gauge"}
-						title={`context · ${fmtPercent(pct)}`}
-					>
-						<span className="sh-gauge-track">
-							<span className="sh-gauge-fill" style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
-						</span>
-						<span className="sh-gauge-pct">{fmtPercent(pct)}</span>
-					</span>
-				)}
+				{pct != null && <ContextGauge pct={pct} />}
 				{state && state.participants.length > 0 && (
 					<span className="sh-avatars">
 						{state.participants.map((p, i) => (
@@ -85,15 +122,7 @@ export function HeaderBar({ snapshot, subCount, railOpen, onToggleRail, onLeave 
 					</span>
 				)}
 				<ThemeToggle />
-				<button
-					type="button"
-					className={railOpen ? "sh-btn sh-btn-icon sh-btn-on" : "sh-btn sh-btn-icon"}
-					onClick={onToggleRail}
-					title={railOpen ? "hide agents" : "show agents"}
-				>
-					<PanelRight size={14} />
-					{subCount > 0 && <span className="sh-badge">{subCount}</span>}
-				</button>
+				<AgentsToggle subCount={subCount} railOpen={railOpen} onToggleRail={onToggleRail} />
 				<button type="button" className="sh-btn sh-btn-icon" onClick={onLeave} title="leave session">
 					<LogOut size={14} />
 				</button>

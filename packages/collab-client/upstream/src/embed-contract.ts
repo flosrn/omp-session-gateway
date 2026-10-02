@@ -22,5 +22,7 @@ export interface CollabEmbedState {
 export interface CollabEmbedOptions {
 	focusPendingRequest?: boolean;
 	shellOwnsLifecycle?: boolean;
+	/** Host-owned header element the client fills with its session tools (context, agents). */
+	headerSlot?: HTMLElement;
 	onStateChange?(state: CollabEmbedState): void;
 }

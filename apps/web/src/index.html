@@ -3,8 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#060809" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#000000" />
+    <meta name="color-scheme" content="dark light" />
     <meta name="description" content="Private directory for live OMP collaboration sessions" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
@@ -20,12 +20,12 @@
         <div class="brand-row">
           <p class="eyebrow">
             <svg width="20" height="20" viewBox="0 0 96 96" aria-hidden="true">
-              <rect x="12" y="16" width="72" height="10" rx="2" fill="#E8ECEF" />
-              <rect x="24" y="26" width="10" height="52" rx="2" fill="#E8ECEF" />
-              <rect x="62" y="26" width="10" height="52" rx="2" fill="#E8ECEF" />
-              <circle cx="48" cy="58" r="8" fill="#31C48D" />
+              <rect x="12" y="16" width="72" height="10" rx="2" fill="currentColor" />
+              <rect x="24" y="26" width="10" height="52" rx="2" fill="currentColor" />
+              <rect x="62" y="26" width="10" height="52" rx="2" fill="currentColor" />
+              <circle cx="48" cy="58" r="8" fill="var(--live)" />
             </svg>
-            <span>Private tailnet directory</span>
+            <span>OMP Sessions</span>
           </p>
           <button id="settings" class="settings-button" type="button" aria-haspopup="dialog" aria-label="Settings">
             <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
@@ -99,6 +99,15 @@
             <span><strong>Preview</strong><small>Session details and a bounded request preview when available.</small><small class="detail-warning">May persist in notification history, screenshots, and on wearables.</small></span>
           </label>
           <p class="sheet-footnote">Per-device, stored with the push subscription on the gateway. Payloads are built at the chosen level — the phone never redacts.</p>
+        </fieldset>
+      </section>
+      <section class="sheet-section" aria-labelledby="sheet-theme-title">
+        <h3 id="sheet-theme-title" class="sheet-section-title">Appearance</h3>
+        <fieldset id="theme-options" class="theme-options">
+          <legend>Theme</legend>
+          <label class="detail-option"><input type="radio" name="theme" value="system" checked /><span><strong>System</strong></span></label>
+          <label class="detail-option"><input type="radio" name="theme" value="dark" /><span><strong>Dark</strong></span></label>
+          <label class="detail-option"><input type="radio" name="theme" value="light" /><span><strong>Light</strong></span></label>
         </fieldset>
       </section>
       <p class="sheet-build">Community project · not affiliated with OMP · build <code><!--ASSET_BUILD--></code></p>

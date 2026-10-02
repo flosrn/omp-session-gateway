@@ -584,13 +584,21 @@ test("embedded active ask matches the original 3d shell interaction", async ({ p
     await expect(page.locator(".sh-ask-option").first()).toHaveClass(/sh-ask-option-checked/u);
     await expect(page.locator(".sh-ask-option-label").first()).toContainText("1 · Implement ADR-0036 locally");
     await expect(page.locator(".sh-ask-send")).toHaveText("Send");
-    await expect(page.locator(".sh-ask-send")).toHaveCSS("background-color", "rgb(49, 196, 141)");
     await expect(
       page.locator(".sh-ask-option").filter({ hasText: "Implement ADR-0036 locally" }).locator(".sh-ask-option-recommended"),
     ).toHaveText("Recommended");
     await expect(
       page.locator(".sh-ask-option").filter({ hasText: "Wait for upstream" }).locator(".sh-ask-option-recommended"),
     ).toHaveCount(0);
+    // The client's session tools live in the gateway bar: the agents toggle counts the subagent and
+    // opens OMP's agents rail over the transcript; the backdrop closes it.
+    const agentsToggle = page.locator(".shell-bar .shell-tools").getByRole("button", { name: "show agents (1)" });
+    await expect(agentsToggle).toBeVisible();
+    await expect(page.locator(".shell-tools .sh-badge")).toHaveText("1");
+    await agentsToggle.click();
+    await expect(page.locator(".sh-rail")).toContainText("scout");
+    await page.locator(".sh-rail-backdrop").click({ position: { x: 4, y: 4 } });
+    await expect(page.locator(".sh-rail")).toHaveCount(0);
     await page.evaluate(() => {
       const socket = (globalThis as typeof globalThis & {
         __askSocket?: { transientClose(): void };
