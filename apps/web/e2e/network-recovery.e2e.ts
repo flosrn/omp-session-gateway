@@ -17,7 +17,7 @@ function session(): SessionMetadata {
   };
 }
 
-test("dashboard reconnects after its live transport is interrupted", { tag: "@core" }, async ({ page }) => {
+test("dashboard reconnects silently after a brief live-transport interruption", { tag: "@core" }, async ({ page }) => {
   const active = session();
   const fixture = await startDashboardFixture([active]);
 
@@ -28,21 +28,26 @@ test("dashboard reconnects after its live transport is interrupted", { tag: "@co
     await expect.poll(
       () => fixture.requests.filter(request => request === "GET /api/v1/events").length,
     ).toBeGreaterThanOrEqual(1);
-
-    expect(fixture.disconnectEvents()).toBeGreaterThan(0);
-    await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "gateway", { timeout: 900 });
-    await expect(page.locator("#status-banner .status-title")).toHaveText("Gateway unavailable");
-    await expect(page.locator(".working-row")).toHaveCount(1);
+    // Record every banner kind shown from here on, so a flash between polls cannot hide.
+    await page.evaluate(() => {
+      const seen: string[] = [];
+      (globalThis as typeof globalThis & { __bannerKinds?: string[] }).__bannerKinds = seen;
+      const banner = document.querySelector<HTMLElement>("#status-banner");
+      new MutationObserver(() => {
+        if (banner !== null && !banner.hidden && banner.dataset.kind !== undefined) seen.push(banner.dataset.kind);
+      }).observe(banner as Node, { attributes: true, childList: true });
+    });
 
     fixture.setSnapshot([active], 2);
-    await expect(page.locator(".working-row")).toHaveCount(1, { timeout: 6_000 });
-    await expect(page.locator("#status-banner")).toBeHidden();
-    await expect.poll(
-      () => fixture.requests.filter(request => request === "GET /api/v1/sessions").length,
-    ).toBeGreaterThanOrEqual(2);
+    expect(fixture.disconnectEvents()).toBeGreaterThan(0);
     await expect.poll(
       () => fixture.requests.filter(request => request === "GET /api/v1/events").length,
+      { timeout: 6_000 },
     ).toBeGreaterThanOrEqual(2);
+    await expect(page.locator(".working-row")).toHaveCount(1);
+    await expect(page.locator("#status-banner")).toBeHidden();
+    expect(await page.evaluate(() => (globalThis as typeof globalThis & { __bannerKinds?: string[] }).__bannerKinds))
+      .not.toContain("gateway");
   } finally {
     await fixture.stop();
   }
@@ -120,7 +125,7 @@ test("failure states keep stale sessions, exact copy, timestamps, and mobile fit
     await page.route("**/api/v1/events", route => route.abort("connectionrefused"));
     expect(fixture.disconnectEvents()).toBeGreaterThan(0);
     await expect(page.locator("#status-banner")).toHaveAttribute("data-kind", "gateway", {
-      timeout: 900,
+      timeout: 8_000,
     });
     await expect(page.locator("#status-banner .status-title")).toHaveText("Gateway unavailable");
     await expect(page.locator("#status-banner .status-detail")).toContainText(

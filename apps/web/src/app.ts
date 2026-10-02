@@ -802,11 +802,50 @@ function scheduleReconnect(): void {
     void refreshAndConnect(false);
   }, delay);
 }
+/**
+ * When the directory stream broke, while the page was visible; cleared once a stream opens or
+ * speaks. A phone drops the stream on every lock, app switch or radio handoff and the reconnect
+ * usually lands within a second or two, so "Gateway unavailable" waits out CONNECTION_EXTENDED_MS
+ * first and is never raised for a page nobody is looking at.
+ */
+let streamInterruptedSince: number | undefined;
+let streamGraceTimeout: number | undefined;
+
+function clearStreamInterruption(): void {
+  streamInterruptedSince = undefined;
+  if (streamGraceTimeout === undefined) return;
+  window.clearTimeout(streamGraceTimeout);
+  streamGraceTimeout = undefined;
+}
+
+function reportStreamInterruption(): void {
+  if (navigator.onLine === false) {
+    showTransportFailure("offline");
+    return;
+  }
+  if (document.visibilityState !== "visible") return;
+  const now = Date.now();
+  streamInterruptedSince ??= now;
+  const remaining = CONNECTION_EXTENDED_MS - (now - streamInterruptedSince);
+  if (remaining <= 0) {
+    showTransportFailure("gateway");
+    return;
+  }
+  if (streamGraceTimeout !== undefined) return;
+  streamGraceTimeout = window.setTimeout(() => {
+    streamGraceTimeout = undefined;
+    if (streamInterruptedSince === undefined || authorizationDenied || document.visibilityState !== "visible") return;
+    showTransportFailure(navigator.onLine === false ? "offline" : "gateway");
+  }, remaining);
+}
+
 function markEventStreamInterrupted(source: EventSource, epoch: number): boolean {
   if (events !== source || epoch !== directoryEpoch) return false;
   clearEventLiveness();
   eventStreamStale = true;
-  showTransportFailure(navigator.onLine === false ? "offline" : "gateway");
+  // The next snapshot must be accepted whatever its revision: the gateway may have restarted.
+  directoryRevision = -1;
+  reportStreamInterruption();
   scheduleReconnect();
   return true;
 }
@@ -2543,6 +2582,7 @@ function connectEvents(epoch: number): void {
     clearReconnectTimeout();
     reconnectAttempt = 0;
     eventStreamStale = false;
+    clearStreamInterruption();
     armEventLiveness(source, epoch);
   };
   for (const type of ["snapshot", "session_upsert", "session_remove"] as const) {
@@ -2723,6 +2763,8 @@ document.addEventListener("freeze", () => {
  * a timer that was frozen with it.
  */
 document.addEventListener("visibilitychange", () => {
+  // A drop while hidden is not an outage the user saw; the grace restarts from the resume.
+  clearStreamInterruption();
   if (document.visibilityState !== "visible") {
     clearTransportFailureTracking();
     return;

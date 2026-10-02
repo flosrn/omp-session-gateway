@@ -971,7 +971,7 @@ describe("dashboard attention and notifications", () => {
     expect(harness.reloads.count).toBe(1);
   });
 
-  test("closes a silent SSE stream and resyncs without manual refresh", async () => {
+  test("closes a silent SSE stream and resyncs, raising the outage only after the grace", async () => {
     const base = session("liveness-session-001");
     const harness = await bootApp({
       permission: "denied",
@@ -982,11 +982,18 @@ describe("dashboard attention and notifications", () => {
     expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(1);
     harness.expireEventLiveness();
     expect(harness.elements.sessionList.querySelectorAll(".working-row")).toHaveLength(1);
+    expect(FakeEventSource.instances[0]?.closed).toBeTrue();
+    // A reconnect usually lands within the grace, so nothing is shown yet.
+    expect(harness.elements.statusBanner.dataset.kind).not.toBe("gateway");
+    expect(harness.pendingDelays()).toContain(3_000);
+
+    // Still down when the grace ends: now it is an outage worth showing.
+    harness.advanceClock(3_000);
+    harness.window.runTimersWithDelay(3_000);
     expect(harness.elements.statusBanner.dataset.kind).toBe("gateway");
     expect(harness.elements.statusBanner.querySelector(".status-title")?.textContent).toBe(
       "Gateway unavailable",
     );
-    expect(FakeEventSource.instances[0]?.closed).toBeTrue();
 
     harness.setList(2, [base]);
     harness.runTimers();
@@ -994,6 +1001,26 @@ describe("dashboard attention and notifications", () => {
     await settleUntil(() => harness.elements.sessionList.querySelectorAll(".working-row").length === 1);
     await settleUntil(() => FakeEventSource.instances.length === 2);
     expect(harness.elements.statusBanner.hidden).toBe(true);
+  });
+
+  test("a stream drop that reconnects within the grace, or happens while hidden, shows no outage", async () => {
+    const base = session("brief-drop-session-01");
+    const harness = await bootApp({ permission: "denied", suffix: "brief-drop", initialSessions: [base] });
+
+    harness.disconnectEvents();
+    harness.setList(2, [base]);
+    harness.window.dispatchEvent(new Event("online"));
+    await settleUntil(() => FakeEventSource.instances.length === 2);
+    await drainMicrotasks();
+    expect(harness.pendingDelays()).not.toContain(3_000);
+    harness.runTimers();
+    await drainMicrotasks();
+    expect(harness.elements.statusBanner.dataset.kind).not.toBe("gateway");
+
+    harness.setVisibility("hidden");
+    harness.disconnectEvents();
+    expect(harness.pendingDelays()).not.toContain(3_000);
+    expect(harness.elements.statusBanner.dataset.kind).not.toBe("gateway");
   });
   test("recovers through the native event stream when browser timers are lost", async () => {
     const base = session("native-reconnect-0001");
@@ -2147,7 +2174,11 @@ async function assertRecoveryInvariants(model: RecoveryModel, real: RecoveryReal
   await Promise.resolve();
   expect(activeModelStreams()).toHaveLength(1);
 
-  const retryDelays = real.harness.pendingDelays().filter(delay => delay <= 30_000);
+  // The 3 s outage grace is a display deadline, not a retry: at most one of it, besides one retry.
+  const delays = real.harness.pendingDelays().filter(delay => delay <= 30_000);
+  const grace = delays.indexOf(3_000);
+  expect(delays.filter(delay => delay === 3_000).length).toBeLessThanOrEqual(2);
+  const retryDelays = grace === -1 ? delays : delays.filter((_, index) => index !== grace);
   expect(retryDelays.length).toBeLessThanOrEqual(1);
   expect(retryDelays.every(delay => delay >= 0 && delay <= 30_000)).toBeTrue();
   expect(real.harness.reloads.count).toBe(0);
