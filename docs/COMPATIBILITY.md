@@ -24,7 +24,10 @@ proof is claimed for this variant.
   guard), the full Gateway runtime suite for apps and packages passed (789 tests, 0 failures,
   32 files, 5,180 expectations, 77 s), with type check of all four packages, the build, and 77
   targeted tests in 3 files (621 expectations). The release-build tests need a clean Git checkout,
-  so the complete `bun run check` can run only after the change is committed. After that run only test fixtures changed (synthetic home
+  so the complete check ran after the commit: on commit `f236a41` the clean `bun run check`
+  passed 1,331 tests with 4 skipped and none failing (77 files, 9,710 expectations, 97 s),
+  including every type check, the build, and the repository, capability and identifier scans.
+  Before that commit only test fixtures changed (synthetic home
   paths); the identifier leak scan then passed, with 173 tests in 4 files (975 expectations, 0
   failures). The final review delta (a refused Retry keeps a write uncertain; the update reload
   waits for pending or uncertain writes; manual sign-in reload confirms) passed type check and
@@ -38,7 +41,8 @@ proof is claimed for this variant.
   passed with the TypeScript/Vite build (existing 1.07 MB chunk warning). After the activity
   budget fix, the real-reader suite passed 16 tests (61 expectations), including a reader killed
   while the metadata lookup hangs, which keeps its saved scan progress. The full HarnessOS suite
-  has no green run. Of four attempts, two hit the runner's time limit (300 s, and 600 s with
+  has no green run. A fifth attempt (`--parallel 4`, 30 s test timeout) hit its 900 s limit
+  without reporting tests. Of the four earlier attempts, two hit the runner's time limit (300 s, and 600 s with
   `--parallel 1` and a 30 s test timeout); one showed a generated-schema failure, since fixed; one
   (`--parallel 4`) passed 1,540 tests and failed 18 across 90 files, all 5-second timeouts in
   suites this change does not touch (patch build, host bootstrap, secrets render, shell
@@ -59,8 +63,11 @@ proof is claimed for this variant.
   is unproven, and its same-id resend replayed; `set` answered 200 and the workspace then read
   `in-review`; `sleep` answered 200 sleeping; `close` answered 200 closed; `resume` answered 200
   and its same-id resend returned an identical receipt. A turn starting on this runner is not yet
-  observed, and `transcript` for an indexed `pi` session answered `409`, which is still being
-  investigated, so not every operation passes on this runner yet.
+  observed. After the `pi` fix, the Gateway transcript of an indexed `pi` root session answered
+  200 with 4 entries ending in `FINAL_SMOKE_OK`; `resume` of a `pi` root session in a new fixture
+  answered 200 `accepted` after Orca's root-lookup probe, and `resume` of an advisor session
+  answered `404 not-found`. A `send` to the resumed `pi` terminal answered 200 `input-accepted`; no
+  turn after a `pi` resume is observed yet.
 - Pre-deployment baseline on netcup-vie, for comparison after deployment: 5 services ok and 2
   inactive (`conversation-engine` and `cloudflared-conversation-engine`, both outside this change
   and left as they are); the Docker chat-engine stack ran 14 of 14 containers, ingress and webhook
@@ -96,7 +103,10 @@ proof is claimed for this variant.
 - Browser: the full e2e campaign on the final Gateway source passed 70 of 70 at 390 and 411 px
   viewports (all 6 e2e files, 65 s). An earlier focused run passed 8 of 8, including create with the
   model omitted versus an explicit model kept across a reordered catalog. A 1440 px desktop
-  screenshot showed no horizontal overflow.
+  screenshot showed no horizontal overflow. In the built app in Chrome on loopback, with the
+  session switcher open and focused, a streamed directory update left the first row the same
+  element, still connected and still focused. The workspace panel opened as a real modal dialog
+  (`:modal`); its behaviour across a page swap and reopening is not yet proven.
 
 **Not verified:** a turn starting after `resume`; turn start after `create` or `send` beyond this
 one fixture; `transcript` and

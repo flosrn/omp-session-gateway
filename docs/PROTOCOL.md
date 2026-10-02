@@ -572,11 +572,16 @@ the host's own records, never opened as a file or used as a working directory.
 - `transcript` looks the session up in the index when it is on; otherwise, or beyond the index
   window, Orca's reader resolves the exact `(agent, sessionId)` on the host itself. Without `agent`
   and without an index match it answers `404 not-found`; an agent Orca cannot decode answers
-  `409 unsupported`.
+  `409 unsupported`. A lookup is tried without `path` before the hint is used. A `pi` session's
+  transcript is read only when the index lists it, by its root session id through Orca's OMP
+  reader, never a file path; an unindexed `pi` session answers `409 unsupported`.
 - `resume` uses the index record when it has one: the command is built from the host's own
   record (fixed argv, every value quoted) inside the Orca worktree that registers its cwd.
   Otherwise only an `omp` session resumes, as `omp --resume <sessionId>`, and only when `path` is
-  exactly a worktree the host registers; anything else answers `404 not-found`.
+  exactly a worktree the host registers; anything else answers `404 not-found`. A `pi` session
+  resumes only after one message is read back through Orca's root lookup, in the host's indexed
+  working directory and worktree. Advisor sessions still appear in history; opening or resuming
+  one answers `404 not-found`.
 
 The client never supplies a command or a working directory. `close` closes the workspace's
 terminals and keeps the worktree.
