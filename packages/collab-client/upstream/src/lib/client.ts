@@ -142,6 +142,8 @@ export class GuestClient {
 	#relaySrtt: number | null = null;
 	#relayRttVariance: number | null = null;
 	#relayProbesPaused = false;
+	/** Set by refuseAuthorization(); this client never transmits or reconnects again. */
+	#authorizationRefused = false;
 
 	#phase: ConnectionPhase = "connecting";
 	#endedReason: string | null = null;
@@ -191,6 +193,7 @@ export class GuestClient {
 	}
 
 	connect(): void {
+		if (this.#authorizationRefused) return;
 		if (this.#phase === "ended") {
 			this.#phase = "connecting";
 			this.#endedReason = null;
@@ -206,9 +209,23 @@ export class GuestClient {
 		this.#socket.close();
 	}
 
+	/**
+	 * The gateway or its edge refused this browser's authorization. Ends the session now: the relay
+	 * transport closes, queued and in-flight frames (including a pending ask response) are dropped,
+	 * retries are cancelled, and the composer disables. Terminal for this client: connect, refresh,
+	 * and every send are ignored afterward, so only a new launch with fresh authorization reconnects.
+	 */
+	refuseAuthorization(): void {
+		if (this.#authorizationRefused) return;
+		this.#authorizationRefused = true;
+		this.#end("authorization refused");
+		// #end skips an already-ended client; the transport must still be closed for good.
+		this.#socket.close();
+	}
+
 	/** Force a fresh relay transport after a browser foreground/network transition. */
 	refreshConnection(): void {
-		if (this.#phase === "ended") return;
+		if (this.#authorizationRefused || this.#phase === "ended") return;
 		this.#socket.reconnect();
 	}
 
@@ -267,24 +284,24 @@ export class GuestClient {
 	}
 
 	sendPrompt(text: string, images?: ImageContent[]): void {
-		if (this.#readOnly) return;
+		if (this.#readOnly || this.#authorizationRefused) return;
 		this.#socket.send({ t: "prompt", text, images: images && images.length > 0 ? images : undefined });
 	}
 
 	sendUiResponse(reqId: number, value?: CollabUiResponseValue): void {
-		if (this.#readOnly || this.#pendingUiResponse !== null || this.#uiRequest?.reqId !== reqId) return;
+		if (this.#readOnly || this.#authorizationRefused || this.#pendingUiResponse !== null || this.#uiRequest?.reqId !== reqId) return;
 		this.#pendingUiResponse = { request: this.#uiRequest, value };
 		this.#socket.send({ t: "ui-response", reqId, value });
 		this.#commit();
 	}
 
 	sendAbort(): void {
-		if (this.#readOnly) return;
+		if (this.#readOnly || this.#authorizationRefused) return;
 		this.#socket.send({ t: "abort" });
 	}
 
 	sendAgentCmd(cmd: "chat" | "kill" | "revive", agentId: string, text?: string): void {
-		if (this.#readOnly) return;
+		if (this.#readOnly || this.#authorizationRefused) return;
 		this.#socket.send({ t: "agent-cmd", cmd, agentId, ...(text === undefined ? {} : { text }) });
 	}
 
@@ -294,6 +311,7 @@ export class GuestClient {
 	 * session end) where re-polling from the same cursor is correct.
 	 */
 	fetchTranscript(agentId: string, fromByte: number): Promise<TranscriptResult | null> {
+		if (this.#authorizationRefused) return Promise.resolve(null);
 		const reqId = ++this.#reqSeq;
 		const { promise, resolve } = Promise.withResolvers<TranscriptResult | null>();
 		const timer = setTimeout(() => {

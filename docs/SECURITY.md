@@ -26,21 +26,52 @@ Keys come only from the configured HTTPS team origin's `/cdn-cgi/access/certs`; 
 followed. Expiry has no skew tolerance; `nbf`/`iat` tolerate 30 seconds. Verification failures are
 opaque and never log the assertion or JOSE errors. Origin/Fetch-Site protections remain in force.
 
-**Revocation limit:** verification uses cached signing keys, not Access identity introspection.
-Revoking an Access session/user does not invalidate an otherwise valid assertion at the backend
-before its expiry. SSE captures the verified expiry at admission and checks it offline on keepalive;
-it does not fetch JWKS again, so a later key-service outage does not end the admitted stream before
-expiry. Launch revalidates authorization before revealing a capability. Access
-revocation does **not** kill an existing collaboration connection: an already-delivered bearer
-capability remains governed by OMP room revocation. Stop/rotate that OMP room to revoke its guests.
+**Revocation limit.** Verification uses cached signing keys, not Access identity introspection.
+Revoking an Access session or user does not invalidate an otherwise valid assertion at the
+backend: the Gateway accepts it until its `exp`. SSE captures the verified expiry at admission and
+checks it offline on keepalive; it does not fetch JWKS again, so a later key-service outage does not
+end the admitted stream before expiry. Launch and workspace replies revalidate authorization
+before they are returned.
 
-Federation is limited to a private gateway-only socket exposing two session routes, not the Hub's
+What revocation does stop is this browser's own use. Once the Access edge refuses one of its
+requests — the directory snapshot or SSE, a workspace call, or the open client's same-origin
+health probe (every 15 s while healthy, and on foreground) — the page disposes its collaboration
+transport, drops queued frames including a pending ask answer, cancels retries, disables the
+composer and the workspace panel, and clears the badge. It reconnects only after a fresh sign-in
+and an explicit launch. A timeout or network error is not a refusal and never triggers this.
+
+This is not server-side revocation of the collaboration bearer. A Control capability already
+delivered stays valid in OMP's room for anyone else holding it, until OMP stops or rotates that
+room. When a phone is lost or a holder must lose access, revoke Access **and** stop or rotate the
+affected OMP rooms ([procedure](OPERATIONS.md#10-lost-phone-and-revocation)).
+
+Federation is limited to a private gateway-only socket exposing three routes, not the Hub's
 owner/admin listener. Its separate bearer is compared with `HUB_SESSION_GATEWAY_TOKEN_SHA256`;
 unset refuses all requests. Gateway token files are owner-only regular files, reread per request
 without following symlinks. The bridge hash, bearer, Access assertions and capabilities must never
 enter diagnostics or logs. Fleet hashes and resume selections authorize nothing on their own.
 Resume stores only version/instance/generation/mode and must fetch fresh auth, metadata and an
 exact-generation capability; no title, path, link, transcript or capability is persisted.
+
+**Workspace RPC boundary** (ADR-034). `POST /api/v1/workspace` admits only a verified,
+allowlisted Access identity with exact `Origin` and `Sec-Fetch-Site: same-origin`, a JSON body of
+at most 64 KiB and the identity's rate window. The gateway checks strict request and reply shapes,
+requires the host to be in the current fleet listing, relays once and revalidates authorization
+before replying. It never reads session files, terminals or Orca itself. HarnessOS repeats the
+host and shape checks at the execution boundary and runs only fixed Orca argv or the five named
+Orca runtime RPCs; no client string becomes a shell command, path, environment or RPC method.
+Error replies are fixed codes, never stderr or exception text. Orca's runtime and paired-device
+credentials stay on the Mac operator and never reach the hub or the Gateway.
+
+**Sensitive metadata.** Signed-in directory metadata now includes text derived from sessions: a
+240-character preview of the last assistant text, the last tool intent, cost and the Orca
+workspace path and comment. Workspace replies add terminal previews, search snippets and saved
+transcripts (up to 500 entries per page, 2 MiB). Treat them like the transcripts they come from:
+they reach only the allowlisted owner, are `no-store`, bypass the service worker, and live only in
+page memory. Browser storage holds cosmetic preferences (theme, grouping, collapsed groups,
+workspace host and tab, quick replies), device-local triage records and the resume selection —
+never a capability, bearer, assertion, preview or transcript. Visible text can still appear in
+screenshots or screen recordings.
 
 
 ## 2. Assets

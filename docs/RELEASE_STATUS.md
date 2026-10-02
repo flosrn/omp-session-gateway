@@ -2,13 +2,18 @@
 
 ## Private flosrn mobile fleet variant — implemented, unqualified
 
-The fork's Cloudflare Access authentication, HarnessOS federation, Control-first launch and
-metadata-only exact-generation resume do not inherit the upstream qualified baseline below.
-Local Chrome mobile-viewport observations are **Tested** only; see
-[fork evidence](COMPATIBILITY.md#private-flosrn-fork-evidence). Actual iPhone, live Web Push,
-production Access/tunnel readiness and Hako coexistence are not qualified for this variant.
-Process isolation and the private gateway-only bridge are required before deployment. The
-upstream published artifacts and their historical qualification below remain unchanged.
+The fork's Cloudflare Access authentication, HarnessOS federation, Control-first launch,
+metadata-only exact-generation resume, and the ADR-034 activity directory, workspace RPC, app
+badge, turn-stop latch and local authorization-loss handling do not inherit the upstream qualified
+baseline below. Their evidence is **Tested** only; see
+[fork evidence](COMPATIBILITY.md#private-flosrn-fork-evidence). Workspace reads and all six writes
+were exercised on real machines through a loopback candidate; index-off fallbacks are unverified,
+and the activity/workspace change has not been deployed. Actual iPhone, live
+Web Push, production Access/tunnel readiness and Hako coexistence are not qualified for this
+variant. Process isolation and the private gateway-only bridge are required before deployment, and
+the Gateway and HarnessOS pins deploy and roll back as a pair
+([order](OPERATIONS.md#private-flosrn-fleet-deployment)). The upstream published artifacts and
+their historical qualification below remain unchanged.
 
 ## Mainline v0.7.1 — published stable
 

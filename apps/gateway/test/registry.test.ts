@@ -65,6 +65,68 @@ describe("SessionRegistry", () => {
     expect(registry.isCurrentActivityStop(stops[0]!)).toBe(false);
   });
 
+  test("carries a working turn across a mid-turn ask so answering and idling still stops once", () => {
+    const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10, clock: new FakeClock() });
+    const stops: SessionActivityStopEvent[] = [];
+    registry.subscribeActivityStops(event => stops.push(event));
+    const sample = (overrides: Partial<ObservedSessionInput>): void => {
+      registry.reconcile({ observed: [observedSession(1, overrides)], retained: new Set() });
+    };
+    sample({ busy: true });
+    // The hub collapses needs-input over working, so the ask arrives with `busy` omitted.
+    sample({ inputRequired: true });
+    sample({ inputRequired: true, busy: false });
+    expect(stops).toEqual([]);
+    // Answered, still working: the turn continues.
+    sample({ busy: true });
+    sample({ inputRequired: true });
+    sample({ busy: false });
+    expect(stops.map(stop => [stop.revision, stop.session.busy, stop.session.inputRequired])).toEqual([[6, false, false]]);
+    expect(registry.isCurrentActivityStop(stops[0]!)).toBe(true);
+    sample({ busy: false });
+    expect(stops).toHaveLength(1);
+  });
+
+  test.each(["unknown", "retained", "generation", "replacement"] as const)(
+    "drops a turn held across an ask at a %s boundary",
+    boundary => {
+      const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10, clock: new FakeClock() });
+      const stops: SessionActivityStopEvent[] = [];
+      registry.subscribeActivityStops(event => stops.push(event));
+      const sample = (generation: number, overrides: Partial<ObservedSessionInput>): void => {
+        registry.reconcile({ observed: [observedSession(generation, overrides)], retained: new Set() });
+      };
+      sample(2, { busy: true });
+      sample(2, { inputRequired: true });
+      switch (boundary) {
+        case "unknown": sample(2, {}); break;
+        case "retained": registry.reconcile({ observed: [], retained: new Set([observedSession().instanceId]) }); break;
+        case "generation": sample(3, { inputRequired: true }); break;
+        case "replacement": sample(2, { inputRequired: true, sessionId: "resumed-session" }); break;
+      }
+      sample(boundary === "generation" ? 3 : 2, {
+        busy: false,
+        ...(boundary === "replacement" ? { sessionId: "resumed-session" } : {}),
+      });
+      expect(stops).toEqual([]);
+    },
+  );
+
+  test("keeps the stop for a view-only session and invalidates it when a new ask opens", () => {
+    const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10, clock: new FakeClock() });
+    const stops: SessionActivityStopEvent[] = [];
+    registry.subscribeActivityStops(event => stops.push(event));
+    const sample = (overrides: Partial<ObservedSessionInput>): void => {
+      registry.reconcile({ observed: [observedSession(1, { canControl: false, ...overrides })], retained: new Set() });
+    };
+    sample({ busy: true });
+    sample({ inputRequired: true });
+    sample({ busy: false });
+    expect(stops).toHaveLength(1);
+    sample({ inputRequired: true });
+    expect(registry.isCurrentActivityStop(stops[0]!)).toBe(false);
+  });
+
   test.each(["retained", "older-generation"] as const)("forgets busy once across a %s gap without extending liveness", gap => {
     const clock = new FakeClock();
     const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10, clock });

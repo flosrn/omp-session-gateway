@@ -2,6 +2,13 @@ import { expect, test, type Page } from "@playwright/test";
 import type { SessionMetadata } from "@omp-session-gateway/protocol";
 import { installSilentWebSocket, startDashboardFixture } from "./fixture-server.ts";
 
+interface CapturedWorkspaceRequest {
+  readonly requestId: string;
+  readonly host: string;
+  readonly operation: string;
+  readonly args: Record<string, unknown>;
+}
+
 function workingSession(id: string, title: string, startedAt: string, cwdLabel = "project"): SessionMetadata {
   return {
     instanceId: id,
@@ -335,6 +342,70 @@ test("transcript search highlights matches across the windowed history and steps
     // Reopening starts from an empty field.
     await toggle.click();
     await expect(page.getByRole("searchbox", { name: "Search transcript" })).toHaveValue("");
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test("creating a workspace sends no model for the agent default and exactly the chosen one otherwise", async ({ page }) => {
+  const fixture = await startDashboardFixture([workingSession("workspace-host-00001", "Host build", "2026-07-21T11:00:00.000Z")], {
+    hosts: [{ host: "mac", status: "live", ageSeconds: 1 }],
+  });
+  const creates: CapturedWorkspaceRequest[] = [];
+  let inventories = 0;
+  let reordered = false;
+  const modelA = { provider: "first", id: "model-a", name: "Model A" };
+  const modelB = { provider: "second", id: "model-b", name: "Model B" };
+  // The gateway route itself is covered server-side; here the page's serialized RPC is the contract.
+  await page.route("**/api/v1/workspace", async route => {
+    const body = route.request().postDataJSON() as CapturedWorkspaceRequest;
+    const data = body.operation === "inventory"
+      ? {
+          projects: [{ id: "p1", name: "app", path: "/code/app" }],
+          workspaces: [],
+          terminals: [],
+          models: reordered ? [modelB, modelA] : [modelA, modelB],
+        }
+      : { worktreeId: `wt-${creates.push(body)}`, accepted: true };
+    if (body.operation === "inventory") inventories += 1;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ requestId: body.requestId, ok: true, data }) });
+  });
+
+  try {
+    await installSilentWebSocket(page);
+    await page.goto(fixture.origin);
+    await page.getByRole("button", { name: "Workspaces" }).click();
+    const panel = page.getByRole("dialog", { name: "Workspaces" });
+    await panel.getByRole("tab", { name: "New" }).click();
+    await expect(panel.getByLabel("Model")).toContainText("Model B");
+    await panel.getByLabel("Workspace name").fill("feature-x");
+    await panel.getByLabel("Prompt").fill("build it");
+
+    // Left on "Agent default": the request must not name any model, least of all the first one.
+    await panel.getByRole("button", { name: "Create workspace" }).click();
+    await expect.poll(() => creates.length).toBe(1);
+    expect(creates[0]).toMatchObject({ host: "mac", operation: "create" });
+    expect(creates[0]?.args).toEqual({ projectId: "p1", name: "feature-x", agent: "omp", prompt: "build it" });
+    await expect(panel.locator(".wsp-outcome-line")).toContainText("accepted");
+
+    await panel.getByLabel("Model").selectOption({ label: "Model B · second" });
+    // The catalog comes back in another order while B is chosen; the choice must stay B.
+    reordered = true;
+    const before = inventories;
+    await panel.getByRole("button", { name: "Refresh" }).click();
+    await expect.poll(() => inventories).toBeGreaterThan(before);
+    await expect(panel.getByLabel("Model").locator("option").nth(1)).toHaveText("Model B · second");
+    await panel.getByRole("button", { name: "Create workspace" }).click();
+    await expect.poll(() => creates.length).toBe(2);
+    expect(creates[1]?.args).toEqual({
+      projectId: "p1",
+      name: "feature-x",
+      agent: "omp",
+      model: { provider: "second", id: "model-b" },
+      prompt: "build it",
+    });
+    expect(creates[1]?.requestId).not.toBe(creates[0]?.requestId);
+    await expectNoHorizontalOverflow(page);
   } finally {
     await fixture.stop();
   }

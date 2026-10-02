@@ -5,7 +5,12 @@ import { createServer, type ServerResponse } from "node:http";
 import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Page } from "@playwright/test";
-import { parseNotificationRoute, type SessionEvent, type SessionMetadata } from "@omp-session-gateway/protocol";
+import {
+  parseNotificationRoute,
+  type FleetHostSummary,
+  type SessionEvent,
+  type SessionMetadata,
+} from "@omp-session-gateway/protocol";
 
 const MIME_TYPES: Readonly<Record<string, string>> = {
   ".css": "text/css; charset=utf-8",
@@ -20,6 +25,8 @@ const distRoot = resolve(fileURLToPath(new URL("../dist/", import.meta.url)));
 
 export interface DashboardFixtureOptions {
   readonly roomKey?: Uint8Array;
+  /** Fleet machines the listing and the event snapshot report; absent means a standalone gateway. */
+  readonly hosts?: readonly FleetHostSummary[];
 }
 
 export interface FixtureLaunchRequest {
@@ -57,10 +64,12 @@ export async function startDashboardFixture(
   const viewCapability = `${roomId}.${roomKey.toString("base64url")}`;
   const controlCapability = `${roomId}.${Buffer.concat([roomKey, randomBytes(16)]).toString("base64url")}`;
 
+  const fleet = options.hosts === undefined ? {} : { hosts: options.hosts, fleetStatus: "ok" as const };
   const snapshotEvent = (): SessionEvent => ({
     type: "snapshot",
     revision,
     sessions: [...sessions.values()],
+    ...fleet,
   });
   const frame = (event: SessionEvent): string => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
   const broadcast = (event: SessionEvent): void => {
@@ -79,7 +88,7 @@ export async function startDashboardFixture(
           "Content-Type": "application/json; charset=utf-8",
           Pragma: "no-cache",
         });
-        response.end(JSON.stringify({ revision, sessions: [...sessions.values()] }));
+        response.end(JSON.stringify({ revision, sessions: [...sessions.values()], ...fleet }));
         return;
       }
       if (method === "GET" && url.pathname === "/api/v1/health") {

@@ -77,7 +77,12 @@ if (webScriptSource === undefined) throw new Error("web build did not emit JavaS
 const webScript = await moveHashedAsset(webScriptSource, "app");
 // OMP's design tokens lead the directory stylesheet, so both surfaces read one palette.
 const tokensSource = await readFile(join(clientSource, "upstream", "src", "styles", "tokens.css"));
-const stylesheetSource = Buffer.concat([tokensSource, Buffer.from("\n"), await readFile(join(webSource, "styles.css"))]);
+const stylesheetSource = Buffer.concat([
+  tokensSource,
+  Buffer.from("\n"), await readFile(join(webSource, "styles.css")),
+  Buffer.from("\n"), await readFile(join(webSource, "activity-directory.css")),
+  Buffer.from("\n"), await readFile(join(webSource, "workspace-panel.css")),
+]);
 const stylesheet = `/assets/app.${digest(stylesheetSource)}.css`;
 await writeFile(join(outputRoot, stylesheet.slice(1)), stylesheetSource);
 

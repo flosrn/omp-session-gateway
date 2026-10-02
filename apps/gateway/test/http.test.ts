@@ -6,13 +6,16 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { SecretCapability, type ObservedSessionInput } from "@omp-session-gateway/protocol";
+import { createCloudflareAccessVerifier } from "../src/access.ts";
 import type { GatewayConfig } from "../src/config.ts";
 import { createHttpHandler } from "../src/http.ts";
 import { SafeLogger } from "../src/logger.ts";
 import { PushService } from "../src/push.ts";
 import { SessionRegistry } from "../src/registry.ts";
 import { StaticAssetStore } from "../src/static.ts";
+import { createWorkspaceApi, type WorkspaceRequest } from "../src/workspace.ts";
 
 const viewCapability = ["HTTP", "VIEW", "CANARY", "00000000000000000000"].join("__");
 const controlCapability = ["HTTP", "CONTROL", "CANARY", "00000000000000000000"].join("__");
@@ -581,6 +584,44 @@ describe("HTTP boundary", () => {
     expect(validateSessionList(list(session, Number.MAX_SAFE_INTEGER + 1))).toBeFalse();
     expect(validateSessionEvent({ type: "snapshot", ...list(session, Number.MAX_SAFE_INTEGER + 1) })).toBeFalse();
     expect(validateSessionEvent({ type: "activity_stop", revision: 1, session })).toBeFalse();
+  });
+
+  test("published schemas accept registry activity/workspace annotations and enforce their bounds", () => {
+    const activity = {
+      at: 1_790_000_000_000, tool: "edit", intent: "Fixing", preview: "Almost done",
+      contextTokens: 1_000, contextWindow: 200_000, cost: 0.75, subagents: 0,
+    };
+    const workspace = {
+      id: "repo::wt", path: "/workspace/host/repo", project: "repo", branch: "main",
+      comment: null, status: null, unread: false, pr: "https://github.com/o/r/pull/1",
+    };
+    const registry = new SessionRegistry({ ttlSeconds: 35, maxSessions: 10 });
+    registry.reconcile({ observed: [{ ...observedSession("a1b2c3d4"), busy: true, activity, workspace }], retained: new Set() });
+    const session = registry.snapshot().sessions[0]!;
+    expect(session).toMatchObject({ activity, workspace });
+    const list = (value: unknown) => ({ revision: 1, sessions: [value] });
+    const unknown = { at: null, tool: null, intent: null, preview: null, contextTokens: null, contextWindow: null, cost: null, subagents: null };
+    for (const valid of [session, { ...session, activity: unknown }, { ...session, workspace: { ...workspace, pr: null } }]) {
+      expect(validateSessionList(list(valid))).toBeTrue();
+      expect(validateSessionEvent({ type: "session_upsert", revision: 1, session: valid })).toBeTrue();
+    }
+    for (const invalid of [
+      { ...session, activity: null },
+      { ...session, activity: { ...activity, extra: 1 } },
+      { ...session, activity: { ...activity, cost: -1 } },
+      { ...session, activity: { ...activity, contextTokens: 1.5 } },
+      { ...session, activity: { ...activity, subagents: -1 } },
+      { ...session, activity: { ...activity, tool: "t".repeat(65) } },
+      { ...session, activity: { ...activity, preview: "p".repeat(241) } },
+      { ...session, activity: { ...activity, tool: "" } },
+      { ...session, activity: { ...activity, intent: "bidi\u202E" } },
+      { ...session, workspace: { ...workspace, unread: "no" } },
+      { ...session, workspace: { ...workspace, project: "p".repeat(129) } },
+      { ...session, workspace: { ...workspace, capability: viewCapability } },
+    ]) {
+      expect(validateSessionList(list(invalid))).toBeFalse();
+      expect(validateSessionEvent({ type: "session_upsert", revision: 1, session: invalid })).toBeFalse();
+    }
   });
 
   test("returns ordered metadata-only no-store list and SSE transitions", async () => {
@@ -1153,5 +1194,377 @@ describe("HTTP boundary", () => {
     expect(lines.join("\n")).not.toContain(viewCapability);
     expect(lines.join("\n")).not.toContain(controlCapability);
     expect(lines.join("\n")).not.toContain("denied@example.com");
+  });
+});
+
+const WORKSPACE_HOST = "studio";
+const WORKSPACE_REQUEST_ID = "11111111-1111-4111-8111-111111111111";
+const WORKSPACE_DATA_CANARY = "WORKSPACE_DATA_CANARY";
+const inventoryData = {
+  projects: [{ id: "project-1", name: WORKSPACE_DATA_CANARY, path: "/workspace/operator/repository" }],
+  workspaces: [],
+  terminals: [],
+  models: [],
+};
+
+/** Serialized JSON request bodies; raw byte and stream cases pass their own `BodyInit`. */
+function sendBody(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    requestId: WORKSPACE_REQUEST_ID,
+    host: WORKSPACE_HOST,
+    operation: "send",
+    args: { handle: "term-1", text: "continue" },
+    ...overrides,
+  });
+}
+
+function inventoryBody(): string {
+  return JSON.stringify({ requestId: WORKSPACE_REQUEST_ID, host: WORKSPACE_HOST, operation: "inventory", args: {} });
+}
+
+type BridgeReply = { readonly status: number; readonly body: unknown };
+
+/** The real API over a bridge that answers like a well-behaved HarnessOS unless told otherwise. */
+function workspaceFixture(reply?: (request: WorkspaceRequest) => Promise<BridgeReply>) {
+  const calls: WorkspaceRequest[] = [];
+  const api = createWorkspaceApi({
+    bridge: {
+      async workspace(request) {
+        calls.push(request);
+        if (reply !== undefined) return reply(request);
+        const data =
+          request.operation === "inventory" ? inventoryData : { accepted: true, requestId: request.requestId, stage: "queued" };
+        return { status: 200, body: { requestId: request.requestId, ok: true, data } };
+      },
+    },
+    isAuthorizedHost: host => host === WORKSPACE_HOST,
+  });
+  return { api, calls };
+}
+
+/** `null` header values are omitted, so a case can drop a default header entirely. */
+function workspacePost(
+  body: BodyInit,
+  headers: Record<string, string | null> = {},
+  identity = "allowed@example.com",
+  url = `${origin}/api/v1/workspace`,
+  requestOrigin = origin,
+): Request {
+  const merged = new Headers();
+  for (const [name, value] of Object.entries({
+    Origin: requestOrigin,
+    "Sec-Fetch-Site": "same-origin",
+    "Content-Type": "application/json",
+    ...headers,
+  })) {
+    if (value !== null) merged.set(name, value);
+  }
+  if (identity.length > 0) merged.set("Tailscale-User-Login", identity);
+  return new Request(url, { method: "POST", headers: merged, body });
+}
+
+describe("workspace RPC boundary", () => {
+  test("refuses unauthenticated, disallowed and cross-origin workspace mutations before relaying", async () => {
+    const { api, calls } = workspaceFixture();
+    const handler = createTestHttpHandler({ config: config(), registry: populatedRegistry(), staticAssets: assets, workspaceApi: api });
+    const refusals: Array<[Request, { address: string }]> = [
+      [workspacePost(sendBody(), {}, ""), peer],
+      [workspacePost(sendBody(), {}, "other@example.com"), peer],
+      [workspacePost(sendBody()), { address: "100.101.102.103" }],
+      [workspacePost(sendBody(), { Origin: "https://evil.example" }), peer],
+      [workspacePost(sendBody(), { Origin: "null" }), peer],
+      [workspacePost(sendBody(), { Origin: null }), peer],
+      [workspacePost(sendBody(), { "Sec-Fetch-Site": "cross-site" }), peer],
+      [workspacePost(sendBody(), { "Sec-Fetch-Site": "same-site" }), peer],
+      [workspacePost(sendBody(), { "Sec-Fetch-Site": null }), peer],
+    ];
+    for (const [refused, from] of refusals) {
+      const response = await handler(refused, from);
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({ ok: false, error: "forbidden" });
+    }
+    expect(calls).toEqual([]);
+
+    const admitted = await handler(workspacePost(sendBody()), peer);
+    expect(admitted.status).toBe(200);
+    expect(await admitted.json()).toEqual({
+      requestId: WORKSPACE_REQUEST_ID,
+      ok: true,
+      data: { accepted: true, requestId: WORKSPACE_REQUEST_ID, stage: "queued", warnings: [] },
+    });
+    expect(calls.map(call => call.operation)).toEqual(["send"]);
+  });
+
+  test("dev mode relays a workspace mutation only from a loopback peer at the loopback origin", async () => {
+    const { api, calls } = workspaceFixture();
+    const handler = createTestHttpHandler({
+      config: config("dev-localhost"),
+      registry: populatedRegistry(),
+      staticAssets: assets,
+      workspaceApi: api,
+    });
+    const loopback = "http://127.0.0.1:4317";
+    const devPost = (requestOrigin: string): Request =>
+      workspacePost(sendBody(), {}, "", `${loopback}/api/v1/workspace`, requestOrigin);
+    expect((await handler(devPost(loopback), { address: "10.0.0.8" })).status).toBe(403);
+    expect((await handler(devPost("http://localhost:4317"), peer)).status).toBe(403);
+    expect(calls).toEqual([]);
+    expect((await handler(devPost(loopback), peer)).status).toBe(200);
+    expect(calls).toHaveLength(1);
+  });
+
+  test("classifies malformed and oversize workspace bodies as 400 and 413 without relaying", async () => {
+    const { api, calls } = workspaceFixture();
+    const handler = createTestHttpHandler({ config: config(), registry: populatedRegistry(), staticAssets: assets, workspaceApi: api });
+    const invalid = [
+      workspacePost("{"),
+      workspacePost(""),
+      workspacePost(new Uint8Array([0x7b, 0xff, 0xfe, 0x7d])),
+      workspacePost(sendBody(), { "Content-Type": "text/plain" }),
+      workspacePost(sendBody(), { "Content-Length": "abc" }),
+      workspacePost(sendBody({ operation: "exec" })),
+      workspacePost(sendBody({ args: { handle: "term-1", text: "continue", cwd: "/" } })),
+    ];
+    for (const refused of invalid) {
+      const response = await handler(refused, peer);
+      expect(response.status).toBe(400);
+      expect(response.headers.get("Cache-Control")).toContain("no-store");
+      expect(await response.json()).toMatchObject({ ok: false, error: "invalid-request" });
+    }
+    // A strict-schema refusal still names the request it refused, so the client can match it.
+    const extraKey = await handler(workspacePost(sendBody({ extra: true })), peer);
+    expect(extraKey.status).toBe(400);
+    expect(await extraKey.json()).toEqual({ requestId: WORKSPACE_REQUEST_ID, ok: false, error: "invalid-request" });
+
+    const json = sendBody();
+    const atLimit = new TextEncoder().encode(json + " ".repeat(64 * 1024 - json.length));
+    const overLimit = (declaredLength?: string): Request =>
+      workspacePost(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(atLimit);
+            controller.enqueue(new TextEncoder().encode(" "));
+            controller.close();
+          },
+        }),
+        declaredLength === undefined ? {} : { "Content-Length": declaredLength },
+      );
+    for (const oversize of [
+      workspacePost(sendBody(), { "Content-Length": String(64 * 1024 + 1) }),
+      overLimit(),
+      overLimit(String(64 * 1024)),
+    ]) {
+      const response = await handler(oversize, peer);
+      expect(response.status).toBe(413);
+      expect(await response.json()).toEqual({ ok: false, error: "too-large" });
+    }
+    expect(calls).toEqual([]);
+
+    const boundary = await handler(workspacePost(atLimit), peer);
+    expect(boundary.status).toBe(200);
+    expect(calls).toHaveLength(1);
+  });
+
+  test("refuses a workspace host outside the fleet directory before relaying", async () => {
+    const { api, calls } = workspaceFixture();
+    const handler = createTestHttpHandler({ config: config(), registry: populatedRegistry(), staticAssets: assets, workspaceApi: api });
+    const unknown = await handler(workspacePost(sendBody({ host: "laptop" })), peer);
+    expect(unknown.status).toBe(404);
+    expect(await unknown.json()).toEqual({ requestId: WORKSPACE_REQUEST_ID, ok: false, error: "unknown-host" });
+    for (const host of ["Studio", "studio;id", "../studio", ""]) {
+      expect((await handler(workspacePost(sendBody({ host })), peer)).status).toBe(400);
+    }
+    expect(calls).toEqual([]);
+  });
+
+  test("returns typed no-store workspace results and fixed classifications for faulty replies", async () => {
+    const answers: Array<() => Promise<BridgeReply>> = [
+      async () => ({ status: 200, body: { requestId: WORKSPACE_REQUEST_ID, ok: true, data: inventoryData } }),
+      async () => ({ status: 409, body: { ok: false, error: "Error: ENOENT /workspace/operator/.secret" } }),
+      async () => ({ status: 500, body: "Traceback /workspace/operator/.secret" }),
+      async () => {
+        throw new Error("socket hang up /workspace/operator/.secret");
+      },
+    ];
+    const { api } = workspaceFixture(() => answers.shift()!());
+    const handler = createTestHttpHandler({ config: config(), registry: populatedRegistry(), staticAssets: assets, workspaceApi: api });
+
+    const result = await handler(workspacePost(inventoryBody()), peer);
+    expect(result.status).toBe(200);
+    expect(result.headers.get("Cache-Control")).toContain("no-store");
+    expect(await result.json()).toEqual({ requestId: WORKSPACE_REQUEST_ID, ok: true, data: inventoryData });
+
+    const expected: Array<[string, number, string]> = [
+      [inventoryBody(), 409, "conflict"],
+      [inventoryBody(), 503, "unavailable"],
+      // A write whose reply was lost may have run: never success, never a read-style retry hint.
+      [sendBody(), 504, "outcome-unknown"],
+    ];
+    for (const [body, status, error] of expected) {
+      const response = await handler(workspacePost(body), peer);
+      expect(response.status).toBe(status);
+      expect(response.headers.get("Cache-Control")).toContain("no-store");
+      const text = await response.text();
+      expect(text).not.toContain(".secret");
+      expect(JSON.parse(text)).toEqual({ requestId: WORKSPACE_REQUEST_ID, ok: false, error });
+    }
+  });
+
+  test("limits workspace calls per identity without consuming the launch window", async () => {
+    const { api, calls } = workspaceFixture();
+    const handler = createTestHttpHandler({
+      config: config(),
+      registry: populatedRegistry(),
+      staticAssets: assets,
+      workspaceApi: api,
+      now: () => 1_000,
+    });
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      expect((await handler(workspacePost(inventoryBody()), peer)).status).toBe(200);
+    }
+    const limited = await handler(workspacePost(inventoryBody()), peer);
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toEqual({ ok: false, error: "rate-limited" });
+    expect(calls).toHaveLength(20);
+    expect((await handler(launchRequest(), peer)).status).toBe(200);
+  });
+
+  test("withholds a delayed workspace answer once the admitting Access assertion expires", async () => {
+    const team = "https://team.cloudflareaccess.com";
+    const audience = "4714c1358e65fe4b408ad6d432a5f878f08194bdb4752441fd56faefa9b2b6f2";
+    const { privateKey, publicKey } = await generateKeyPair("RS256", { extractable: true });
+    const jwk = { ...(await exportJWK(publicKey)), kid: "kid-a", alg: "RS256", use: "sig" };
+    const clock = { nowMs: Date.UTC(2026, 9, 1, 12) };
+    const verifier = createCloudflareAccessVerifier({
+      teamDomain: team,
+      audience,
+      now: () => clock.nowMs,
+      fetch: async () => Response.json({ keys: [jwk] }),
+    });
+    const seconds = Math.floor(clock.nowMs / 1_000);
+    const assertion = await new SignJWT({
+      aud: [audience],
+      email: "allowed@example.com",
+      exp: seconds + 60,
+      iat: seconds,
+      nbf: seconds,
+      iss: team,
+      type: "app",
+      identity_nonce: "nonce",
+      sub: "7335d417-61da-459d-899c-0a01c76a2f94",
+    })
+      .setProtectedHeader({ alg: "RS256", kid: "kid-a", typ: "JWT" })
+      .sign(privateKey);
+
+    let held: { readonly entered: () => void; readonly gate: Promise<void> } | undefined;
+    const { api, calls } = workspaceFixture(async request => {
+      if (held !== undefined) {
+        held.entered();
+        await held.gate;
+      }
+      return { status: 200, body: { requestId: request.requestId, ok: true, data: inventoryData } };
+    });
+    const base = config();
+    const handler = createTestHttpHandler({
+      config: {
+        ...base,
+        auth: { mode: "cloudflare-access", allowedLogins: ["allowed@example.com"], cloudflareAccess: { teamDomain: team, audience } },
+      },
+      registry: populatedRegistry(),
+      staticAssets: assets,
+      workspaceApi: api,
+      accessVerifier: verifier,
+    });
+    const accessPost = (): Request => workspacePost(inventoryBody(), { "Cf-Access-Jwt-Assertion": assertion }, "");
+
+    const admitted = await handler(accessPost(), peer);
+    expect(admitted.status).toBe(200);
+    expect(await admitted.text()).toContain(WORKSPACE_DATA_CANARY);
+
+    let entered!: () => void;
+    const bridgeEntered = new Promise<void>(resolve => (entered = resolve));
+    let release!: () => void;
+    held = { entered, gate: new Promise<void>(resolve => (release = resolve)) };
+    const pending = handler(accessPost(), peer);
+    await bridgeEntered;
+    clock.nowMs += 61_000;
+    release();
+    const withheld = await pending;
+    expect(withheld.status).toBe(401);
+    expect(withheld.headers.get("Cache-Control")).toContain("no-store");
+    // The relay already ran: never marked as not-run.
+    expect(withheld.headers.get("X-OMP-Workspace-Outcome")).toBeNull();
+    const text = await withheld.text();
+    expect(text).not.toContain(WORKSPACE_DATA_CANARY);
+    expect(JSON.parse(text)).toMatchObject({ code: "authentication_required" });
+    expect(calls).toHaveLength(2);
+
+    held = undefined;
+    expect((await handler(accessPost(), peer)).status).toBe(401);
+    expect(calls).toHaveLength(2);
+  });
+
+  test("a workspace write refused before relay is a definitive unauthorized envelope", async () => {
+    const team = "https://team.cloudflareaccess.com";
+    const audience = "4714c1358e65fe4b408ad6d432a5f878f08194bdb4752441fd56faefa9b2b6f2";
+    const { api, calls } = workspaceFixture();
+    const base = config();
+    const handler = createTestHttpHandler({
+      config: {
+        ...base,
+        auth: { mode: "cloudflare-access", allowedLogins: ["allowed@example.com"], cloudflareAccess: { teamDomain: team, audience } },
+      },
+      registry: populatedRegistry(),
+      staticAssets: assets,
+      workspaceApi: api,
+      accessVerifier: createCloudflareAccessVerifier({ teamDomain: team, audience, fetch: async () => Response.json({ keys: [] }) }),
+    });
+    const refused = await handler(workspacePost(sendBody(), {}, ""), peer);
+    expect(refused.status).toBe(401);
+    expect(refused.headers.get("X-OMP-Workspace-Outcome")).toBeNull();
+    expect(await refused.json()).toEqual({ ok: false, error: "unauthorized" });
+    expect(calls).toEqual([]);
+    const sessions = await handler(new Request(`${origin}/api/v1/sessions`), peer);
+    expect(sessions.status).toBe(401);
+    expect(await sessions.json()).toMatchObject({ code: "authentication_required" });
+  });
+
+  test("an Access key outage before relay is a 503 marked not-run; other 503s are unmarked", async () => {
+    const team = "https://team.cloudflareaccess.com";
+    const audience = "4714c1358e65fe4b408ad6d432a5f878f08194bdb4752441fd56faefa9b2b6f2";
+    const { privateKey } = await generateKeyPair("RS256", { extractable: true });
+    const seconds = Math.floor(Date.now() / 1_000);
+    const assertion = await new SignJWT({ aud: [audience], email: "allowed@example.com", exp: seconds + 60, iat: seconds, nbf: seconds, iss: team, type: "app" })
+      .setProtectedHeader({ alg: "RS256", kid: "kid-a", typ: "JWT" })
+      .sign(privateKey);
+    const { api, calls } = workspaceFixture();
+    const base = config();
+    const accessConfig = {
+      ...base,
+      auth: { mode: "cloudflare-access" as const, allowedLogins: ["allowed@example.com"], cloudflareAccess: { teamDomain: team, audience } },
+    };
+    const handler = createTestHttpHandler({
+      config: accessConfig,
+      registry: populatedRegistry(),
+      staticAssets: assets,
+      workspaceApi: api,
+      accessVerifier: createCloudflareAccessVerifier({
+        teamDomain: team,
+        audience,
+        fetch: async () => {
+          throw new TypeError("network down");
+        },
+      }),
+    });
+    const outage = await handler(workspacePost(sendBody(), { "Cf-Access-Jwt-Assertion": assertion }, ""), peer);
+    expect(outage.status).toBe(503);
+    expect(outage.headers.get("X-OMP-Workspace-Outcome")).toBe("not-run");
+    expect(await outage.json()).toEqual({ ok: false, error: "unavailable" });
+    expect(calls).toEqual([]);
+
+    const tailnet = createTestHttpHandler({ config: base, registry: populatedRegistry(), staticAssets: assets });
+    const unconfigured = await tailnet(workspacePost(sendBody()), peer);
+    expect(unconfigured.status).toBe(503);
+    expect(unconfigured.headers.get("X-OMP-Workspace-Outcome")).toBeNull();
   });
 });

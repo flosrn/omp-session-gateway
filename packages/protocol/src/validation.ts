@@ -4,6 +4,17 @@ import {
   FLEET_LINK_ERRORS,
   FLEET_NATIVE_INSTANCE_ID_PATTERN,
   MAX_FRAME_BYTES,
+  MAX_ACTIVITY_INTENT_LENGTH,
+  MAX_ACTIVITY_PREVIEW_LENGTH,
+  MAX_ACTIVITY_TOOL_LENGTH,
+  MAX_EPOCH_MS,
+  MAX_WORKSPACE_BRANCH_LENGTH,
+  MAX_WORKSPACE_COMMENT_LENGTH,
+  MAX_WORKSPACE_ID_LENGTH,
+  MAX_WORKSPACE_PATH_LENGTH,
+  MAX_WORKSPACE_PR_LENGTH,
+  MAX_WORKSPACE_PROJECT_LENGTH,
+  MAX_WORKSPACE_STATUS_LENGTH,
   INSTANCE_ID_PATTERN,
   MAX_FLEET_HOST_ERROR_CODEPOINTS,
   MAX_FLEET_HOSTS,
@@ -39,6 +50,8 @@ import {
   type SessionEvent,
   type SessionListResponse,
   type SessionMetadata,
+  type SessionActivity,
+  type SessionWorkspace,
 } from "./types.ts";
 
 const SESSION_ID_PATTERN = /^[^\0\r\n]{1,256}$/u;
@@ -620,7 +633,8 @@ function requirePatterned(value: unknown, pattern: RegExp): string {
 
 /**
  * Fleet metadata is all-or-nothing, and its invariants are what make an unavailable row safe to
- * show: it can never claim Control, never report activity, and only a `live` machine is available.
+ * show: it can never claim Control or `busy`, and only a `live` machine is available. Its `activity`
+ * and `workspace`, if any, are the last known reading and the browser draws them as such.
  */
 function parseFleetMetadata(record: JsonRecord): Pick<SessionMetadata, (typeof FLEET_METADATA_KEYS)[number]> {
   const present = FLEET_METADATA_KEYS.filter(key => Object.hasOwn(record, key));
@@ -645,12 +659,134 @@ function parseFleetMetadata(record: JsonRecord): Pick<SessionMetadata, (typeof F
   };
 }
 
+/**
+ * The HarnessOS reader's own UNSAFE_TEXT set: every C0 and C1 control (tab and newlines included,
+ * since previews are flattened to one line), the bidi marks, overrides and isolates. The hub never
+ * emits these, so refusing them costs nothing. Non-global on purpose: a `g` pattern's `test` is
+ * stateful across calls.
+ */
+const UNSAFE_ANNOTATION_TEXT = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/u;
+const ACTIVITY_KEYS = ["at", "tool", "intent", "preview", "contextTokens", "contextWindow", "cost", "subagents"] as const;
+const WORKSPACE_KEYS = ["id", "path", "project", "branch", "comment", "status", "unread", "pr"] as const;
+
+/** Rendered as text only, so a control or bidi override is refused rather than drawn. */
+function requireAnnotationText(value: unknown, maximumLength: number): string {
+  if (
+    typeof value !== "string" || value.length === 0 || value.length > maximumLength ||
+    UNSAFE_ANNOTATION_TEXT.test(value)
+  ) {
+    throw new ProtocolValidationError();
+  }
+  return value;
+}
+
+function nullableAnnotationText(value: unknown, maximumLength: number): string | null {
+  return value === null ? null : requireAnnotationText(value, maximumLength);
+}
+
+/** A cost is fractional; NaN, infinities, negatives and negative zero are malformed, null is unknown. */
+function nullableNonNegativeNumber(value: unknown): number | null {
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || Object.is(value, -0)) {
+    throw new ProtocolValidationError();
+  }
+  return value;
+}
+
+function parseSessionActivity(value: unknown): SessionActivity {
+  const record = requireRecord(value);
+  requireExactKeys(record, ACTIVITY_KEYS);
+  return {
+    at: nullableInteger(record.at, 0, MAX_EPOCH_MS),
+    tool: nullableAnnotationText(record.tool, MAX_ACTIVITY_TOOL_LENGTH),
+    intent: nullableAnnotationText(record.intent, MAX_ACTIVITY_INTENT_LENGTH),
+    preview: nullableAnnotationText(record.preview, MAX_ACTIVITY_PREVIEW_LENGTH),
+    contextTokens: nullableInteger(record.contextTokens, 0),
+    contextWindow: nullableInteger(record.contextWindow, 0),
+    cost: nullableNonNegativeNumber(record.cost),
+    subagents: nullableInteger(record.subagents, 0),
+  };
+}
+
+function parseSessionWorkspace(value: unknown): SessionWorkspace {
+  const record = requireRecord(value);
+  requireExactKeys(record, WORKSPACE_KEYS);
+  if (typeof record.unread !== "boolean") throw new ProtocolValidationError();
+  return {
+    id: requireAnnotationText(record.id, MAX_WORKSPACE_ID_LENGTH),
+    path: requireAnnotationText(record.path, MAX_WORKSPACE_PATH_LENGTH),
+    project: requireAnnotationText(record.project, MAX_WORKSPACE_PROJECT_LENGTH),
+    branch: nullableAnnotationText(record.branch, MAX_WORKSPACE_BRANCH_LENGTH),
+    comment: nullableAnnotationText(record.comment, MAX_WORKSPACE_COMMENT_LENGTH),
+    status: nullableAnnotationText(record.status, MAX_WORKSPACE_STATUS_LENGTH),
+    unread: record.unread,
+    pr: nullableAnnotationText(record.pr, MAX_WORKSPACE_PR_LENGTH),
+  };
+}
+
+/**
+ * Activity and workspace are optional on every surface. On the browser wire a present key holds a
+ * full object; the bridge also accepts `null` as "not reported" so a hub that nulls the field
+ * keeps its sessions. Either way an absent annotation stays absent — never an invented zero.
+ */
+function sessionAnnotations(
+  record: JsonRecord,
+  acceptNull: boolean,
+): Pick<SessionMetadata, "activity" | "workspace"> {
+  const read = <T>(key: "activity" | "workspace", parse: (value: unknown) => T): T | undefined => {
+    if (!Object.hasOwn(record, key)) return undefined;
+    const value = record[key];
+    if (value === null && acceptNull) return undefined;
+    return parse(value);
+  };
+  const activity = read("activity", parseSessionActivity);
+  const workspace = read("workspace", parseSessionWorkspace);
+  return {
+    ...(activity === undefined ? {} : { activity }),
+    ...(workspace === undefined ? {} : { workspace }),
+  };
+}
+
+function copyAnnotations(source: Pick<SessionMetadata, "activity" | "workspace">): Pick<SessionMetadata, "activity" | "workspace"> {
+  return {
+    ...(source.activity === undefined ? {} : { activity: { ...source.activity } }),
+    ...(source.workspace === undefined ? {} : { workspace: { ...source.workspace } }),
+  };
+}
+
+export function sameSessionActivity(left: SessionActivity | undefined, right: SessionActivity | undefined): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return ACTIVITY_KEYS.every(key => left[key] === right[key]);
+}
+
+export function sameSessionWorkspace(left: SessionWorkspace | undefined, right: SessionWorkspace | undefined): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return WORKSPACE_KEYS.every(key => left[key] === right[key]);
+}
+
+/** Everything activity/workspace contributes to a rendered row; the registry's change test uses it. */
+export function sameDirectoryAnnotations(
+  left: Pick<SessionMetadata, "activity" | "workspace">,
+  right: Pick<SessionMetadata, "activity" | "workspace">,
+): boolean {
+  return sameSessionActivity(left.activity, right.activity) && sameSessionWorkspace(left.workspace, right.workspace);
+}
+
+/** Deep copy of one browser record, so a caller can never mutate registry-held nested objects. */
+export function cloneSessionMetadata(metadata: SessionMetadata): SessionMetadata {
+  return {
+    ...metadata,
+    ...(metadata.ask === undefined ? {} : { ask: { ...metadata.ask } }),
+    ...copyAnnotations(metadata),
+  };
+}
+
 function parseSessionMetadata(value: unknown): SessionMetadata {
   const record = requireRecord(value);
   requireExactKeys(
     record,
     ["instanceId", "generation", "startedAt", "lastSeenAt", "canView", "canControl"],
-    ["title", "cwdLabel", "model", "inputRequired", "ask", "busy", ...FLEET_METADATA_KEYS],
+    ["title", "cwdLabel", "model", "inputRequired", "ask", "busy", "activity", "workspace", ...FLEET_METADATA_KEYS],
   );
   if (
     typeof record.canView !== "boolean" ||
@@ -696,6 +832,7 @@ function parseSessionMetadata(value: unknown): SessionMetadata {
     ...(record.busy === undefined ? {} : { busy: record.busy as boolean }),
     ...(ask === undefined ? {} : { ask }),
     ...fleet,
+    ...sessionAnnotations(record, false),
   };
 }
 
@@ -801,7 +938,8 @@ export function parseLaunchResponse(value: unknown): LaunchResponse {
  * Projects one observed host onto the browser-safe directory record. A standalone host always
  * answers a `view` link request, while `control` depends on how the session was shared. A fleet
  * record is Control-only (the bridge brokers nothing else), and an unavailable one claims neither
- * Control nor activity. No capability is involved — those are fetched per launch.
+ * Control nor `busy`. Activity and workspace stay as the last known reading, which the browser
+ * marks stale from `hostStatus`. No capability is involved — those are fetched per launch.
  */
 export function sessionMetadataFromObserved(
   input: ObservedSessionInput,
@@ -835,6 +973,7 @@ export function sessionMetadataFromObserved(
       inputRequired: input.inputRequired,
       ...(input.busy === undefined || unavailable ? {} : { busy: input.busy }),
       ...fleetFields,
+      ...copyAnnotations(input),
     },
     // Freshness is not identity: a machine going stale and back keeps the same room.
     immutableIdentity: fleet ? `${host}\0${originalInstanceId}\0${base}` : base,
@@ -881,6 +1020,7 @@ export function observedSessionFromFleet(
     originalInstanceId: session.instanceId,
     hostStatus: host.status,
     available,
+    ...copyAnnotations(session),
   };
 }
 
@@ -916,7 +1056,7 @@ function parseFleetBridgeSession(value: unknown): FleetBridgeSession {
     record,
     ["instanceId", "generation", "sessionId", "title", "pid", "cwd", "model", "roomSince", "state", "guests",
       "relayConnected", "tmuxSession"],
-    ["canControl"],
+    ["canControl", "activity", "workspace"],
   );
   if (typeof record.state !== "string" || !Object.hasOwn(FLEET_SESSION_STATES, record.state)) {
     throw new ProtocolValidationError();
@@ -945,6 +1085,7 @@ function parseFleetBridgeSession(value: unknown): FleetBridgeSession {
     relayConnected: record.relayConnected,
     tmuxSession: nullableBoundedString(record.tmuxSession, 128),
     ...(record.canControl === undefined ? {} : { canControl: record.canControl }),
+    ...sessionAnnotations(record, true),
   };
 }
 

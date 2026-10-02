@@ -223,10 +223,29 @@ positive/negative Access identity, expired SSE, exact-generation launch/resume a
 Process-account separation and the private gateway-only socket must be verified before deployment;
 a bearer guard on the Hub's shared privileged socket is insufficient.
 
-Access revocation does not kill an existing OMP collaboration connection. See the
-[revocation limit](SECURITY.md#private-flosrn-access-and-fleet-boundary). Local Chrome viewport
-timings are [Tested evidence](COMPATIBILITY.md#private-flosrn-fork-evidence), not production or
-iPhone qualification. Browser suspension is handled by reconnect/relaunch, not continuous execution.
+**Deploy order and rollback.** The Gateway's bridge parser is exact: a Gateway built before the
+annotation change refuses a HarnessOS listing that carries `activity` or `workspace`, and the whole
+fleet shows unreachable. A HarnessOS hub without `/gateway/workspace` answers the panel's reads
+`503` and its writes `504 outcome-unknown`. So the two pins move as a pair:
+
+1. Build and ready the new Gateway release from its HarnessOS pin first; it reads both old and new
+   listings.
+2. Then deliver the HarnessOS hub and restart the Mac operator agent, which start emitting
+   annotations and serving the workspace broker. To avoid an intermediate window, stop the
+   operator's push and the hub before starting the new ones.
+3. Roll back as the same pair: return HarnessOS to its previous pin (hub and operator), then the
+   Gateway pin. Never roll back the Gateway alone while the hub still emits annotations. Failed
+   readiness of a new Gateway release restores the previous config/unit automatically.
+
+After deployment, prove the actual surface through an authenticated browser at the public origin
+— a Cloudflare challenge page is not a pass — and record it as **Tested**, not qualified.
+
+Access revocation stops this browser's use at the next refused request, but the backend accepts
+an unexpired assertion and an already-delivered Control capability stays valid in its OMP room for
+any other holder. See the [revocation limit](SECURITY.md#private-flosrn-access-and-fleet-boundary).
+Local Chrome viewport timings are [Tested evidence](COMPATIBILITY.md#private-flosrn-fork-evidence),
+not production or iPhone qualification. Browser suspension is handled by reconnect/relaunch, not
+continuous execution.
 
 
 ## 5. Tailscale Serve
@@ -457,7 +476,10 @@ deliberately prints its bearer links.
 If the phone is lost or compromised:
 
 1. remove or expire the Android device in Tailscale;
-2. revoke relevant identity-provider sessions when appropriate;
+2. revoke relevant identity-provider sessions when appropriate; on the private fleet path, revoke
+   the Cloudflare Access user or session — the edge refuses the lost browser's next request and it
+   drops its own transport, but the backend still accepts an unexpired assertion and step 5 is
+   what invalidates a Control capability someone else may hold;
 3. narrow or temporarily disable the tailnet grant;
 4. stop the gateway with its matching CLI’s `uninstall` command if directory access must be
    disabled immediately; this does not disconnect an already-established OMP relay session;

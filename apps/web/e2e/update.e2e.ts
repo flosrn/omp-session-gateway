@@ -202,9 +202,11 @@ for (const order of ["the failure settles first", "a collaboration mounts first"
       expect(await loadCount(page)).toBe(1);
 
       if (order === "the failure settles first") {
-        // One settled launch must not release the update while the other is still pending.
+        // One settled launch must not release the update while the other is still pending. The
+        // newer selection supersedes the failed one, so it stays pending and still mounts.
         failingLaunch.release();
-        await expect(page.locator("#status-banner")).toHaveText("The session could not be opened. Try again.");
+        await failingLaunch.finished;
+        await expect(page.getByRole("button", { name: "View Automatic PWA upgrade" })).toBeDisabled();
         await page.waitForTimeout(250);
         expect(await loadCount(page)).toBe(1);
         viewLaunch.release();
@@ -281,6 +283,85 @@ test("an updated PWA applies its deferred update once a routed notification expi
     await expect(page).toHaveURL(`${fixture.origin}/`);
     await expect(page.locator(".working-row")).toHaveCount(1);
     expect(fixture.launchRequests).toEqual([]);
+  } finally {
+    await fixture.stop();
+  }
+});
+
+test("an updated PWA waits while a workspace write is pending or uncertain, and reloads once the user clears it", async ({ page }) => {
+  const fixture = await startDashboardFixture([session()], { hosts: [{ host: "mac", status: "live", ageSeconds: 1 }] });
+  await installLoadCounter(page);
+  const createReplies: { status: number; error: string }[] = [
+    { status: 504, error: "outcome-unknown" },
+    { status: 429, error: "rate-limited" },
+  ];
+  const createIds: string[] = [];
+  const firstCreate = Promise.withResolvers<void>();
+  const releaseFirstCreate = Promise.withResolvers<void>();
+  await page.route("**/api/v1/workspace", async route => {
+    const body = route.request().postDataJSON() as { requestId: string; operation: string };
+    if (body.operation === "inventory") {
+      const data = { projects: [{ id: "p1", name: "app", path: "/code/app" }], workspaces: [], terminals: [], models: [] };
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ requestId: body.requestId, ok: true, data }) });
+      return;
+    }
+    createIds.push(body.requestId);
+    if (createIds.length === 1) {
+      firstCreate.resolve();
+      await releaseFirstCreate.promise;
+    }
+    const reply = createReplies.shift() ?? { status: 503, error: "unavailable" };
+    await route.fulfill({
+      status: reply.status,
+      contentType: "application/json",
+      body: JSON.stringify({ requestId: body.requestId, ok: false, error: reply.error }),
+    });
+  });
+
+  try {
+    await page.goto(fixture.origin);
+    await expect(page.locator(".working-row")).toHaveCount(1);
+    await waitForControlledWorker(page);
+    expect(await loadCount(page)).toBe(1);
+
+    await page.getByRole("button", { name: "Workspaces" }).click();
+    const panel = page.getByRole("dialog", { name: "Workspaces" });
+    await panel.getByRole("tab", { name: "New" }).click();
+    await expect(panel.getByLabel("Project")).toHaveValue("p1");
+    await panel.getByLabel("Workspace name").fill("feature-x");
+    await panel.getByLabel("Prompt").fill("build it");
+    await expect(panel.getByLabel("Prompt")).toHaveValue("build it");
+    await panel.getByRole("button", { name: "Create workspace" }).click();
+    await firstCreate.promise;
+    const outcome = panel.locator(".wsp-outcome-line");
+    await expect(outcome).toHaveAttribute("data-state", "pending");
+
+    // A receipt in flight would be lost by a reload.
+    await upgradeThroughActivation(page, fixture);
+    expect(await loadCount(page)).toBe(1);
+
+    // The lost receipt leaves the write uncertain: the update still waits.
+    releaseFirstCreate.resolve();
+    await expect(outcome).toHaveAttribute("data-state", "uncertain");
+    await expect(panel.getByRole("button", { name: "Create workspace" })).toBeDisabled();
+    // The app's deferred-update fallback fires within 1 s of a settle; outlast it before asserting.
+    await page.waitForTimeout(1_250);
+    expect(await loadCount(page)).toBe(1);
+
+    // A refused retry says nothing about the first attempt, which may still have run.
+    await panel.getByRole("button", { name: "Retry same request" }).click();
+    await expect.poll(() => createIds.length).toBe(2);
+    await expect(outcome).toContainText("Retry was refused");
+    await expect(outcome).toHaveAttribute("data-state", "uncertain");
+    expect(createIds[1]).toBe(createIds[0]);
+    await page.waitForTimeout(1_250);
+    expect(await loadCount(page)).toBe(1);
+
+    // Only the user's explicit acknowledgement settles it, and then the deferred update applies.
+    await panel.getByRole("button", { name: "Checked the machine — clear" }).click();
+    await expect.poll(() => loadCount(page)).toBe(2);
+    await expect(page).toHaveURL(`${fixture.origin}/`);
+    expect(createIds).toHaveLength(2);
   } finally {
     await fixture.stop();
   }

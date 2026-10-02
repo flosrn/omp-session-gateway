@@ -18,6 +18,96 @@ They do not prove actual iPhone/Safari, Home Screen, background Web Push, produc
 tunnel readiness, Hako coexistence or direct/proxy reachability. No real iPhone or live Web Push
 proof is claimed for this variant.
 
+**Tested — activity directory and workspace panel (ADR-034), 2026-10-03, unreleased candidate:**
+
+- Automated: after the last review fixes (bridge auth-error mapping and the uncertain-write
+  guard), the full Gateway runtime suite for apps and packages passed (789 tests, 0 failures,
+  32 files, 5,180 expectations, 77 s), with type check of all four packages, the build, and 77
+  targeted tests in 3 files (621 expectations). The release-build tests need a clean Git checkout,
+  so the complete `bun run check` can run only after the change is committed. After that run only test fixtures changed (synthetic home
+  paths); the identifier leak scan then passed, with 173 tests in 4 files (975 expectations, 0
+  failures). The final review delta (a refused Retry keeps a write uncertain; the update reload
+  waits for pending or uncertain writes; manual sign-in reload confirms) passed type check and
+  build, 20 workspace-controller unit tests (72 expectations) and 14 of 14 update e2e tests at both
+  viewports. The later before/after-relay fixes (the `not-run` marker, pre-relay `401`/`403`
+  envelopes, quick-reply double-tap guard, launcher and tab-loading fixes) passed 95 focused HTTP,
+  panel, composer and transcript tests in 4 files (729 expectations); with the panel-close and
+  switcher fixes, all four type checks and the build then passed, and the session-tools and update
+  browser tests passed 22 of 22 at 390 and 411 px, including the update-reload receipt guard. HarnessOS: final type check passed; 153 tests in 6 files
+  (640 expectations, including the generated contract) and the hub web suite (95 tests, 9 files)
+  passed with the TypeScript/Vite build (existing 1.07 MB chunk warning). After the activity
+  budget fix, the real-reader suite passed 16 tests (61 expectations), including a reader killed
+  while the metadata lookup hangs, which keeps its saved scan progress. The full HarnessOS suite
+  has no green run. Of four attempts, two hit the runner's time limit (300 s, and 600 s with
+  `--parallel 1` and a 30 s test timeout); one showed a generated-schema failure, since fixed; one
+  (`--parallel 4`) passed 1,540 tests and failed 18 across 90 files, all 5-second timeouts in
+  suites this change does not touch (patch build, host bootstrap, secrets render, shell
+  integration), cause not measured, so not cleared as unrelated. Run alone with a 30 s test
+  timeout, the patch-build suite passed 45 tests (131 expectations, 109 s); this is not a full-suite
+  run and does not measure the timeout cause. Run the same way, the shell-integration and
+  secrets-render suites passed 31 tests (350 expectations, 21 s), and the host-bootstrap suite
+  passed 23 (245 expectations, 14 s). On the settled runner source, the focused HarnessOS run
+  passed 184 tests in 9 files (2,230 expectations, 37 s), including the runner's eight safety
+  regressions (request deadlines, durable retired guards and the others), the 3 corrected Orca RPC
+  real-transport fixtures and the 16 activity-boundary tests. Before deployment, the gapicore service check reported 17 services ok and none
+  failing. A throwaway smoke of `FleetBridgeClient.workspace` against a real Bun HTTP server on a
+  Unix socket: a write POST with the bearer got 200 and the exact request's receipt; a `text/html`
+  reply and a JSON reply over 2 MiB were both rejected.
+- Settled runner on a loopback Gateway (`localhost:4343`) against real machines: `inventory`
+  answered 200 (26 projects, 21 terminals); `create` answered 200 and resending the same request
+  id returned an identical receipt; `send` answered 200 at `input-accepted`, warning that delivery
+  is unproven, and its same-id resend replayed; `set` answered 200 and the workspace then read
+  `in-review`; `sleep` answered 200 sleeping; `close` answered 200 closed; `resume` answered 200
+  and its same-id resend returned an identical receipt. A turn starting on this runner is not yet
+  observed, and `transcript` for an indexed `pi` session answered `409`, which is still being
+  investigated, so not every operation passes on this runner yet.
+- Pre-deployment baseline on netcup-vie, for comparison after deployment: 5 services ok and 2
+  inactive (`conversation-engine` and `cloudflared-conversation-engine`, both outside this change
+  and left as they are); the Docker chat-engine stack ran 14 of 14 containers, ingress and webhook
+  included.
+- Real data: the HarnessOS reader produced activity, context window and workspace for all 14 live
+  sessions it read; cost became known for all 14 after repeated incremental scans (earlier passes
+  correctly reported `null` while files were unread).
+- Candidate on private loopback (`localhost:4339`, not the public origin): the directory rendered
+  all 14 real sessions with previews, context meters, costs, subagent counts and workspace chips;
+  no horizontal overflow at a 390 px viewport; grouping by Project and Machine, group collapse, and
+  persistence across reload worked.
+- Workspace RPC through the loopback Gateway against real machines: `inventory` answered 200 with
+  26 projects, 45 workspaces, 21 terminals and 112 models, previews at most 240 characters.
+  `search` on macbook (index on) returned 20 hits; on compute hosts with the index off it reported
+  disabled with no hits. The panel at 390 px showed 20 real rows with no overflow and two
+  correctly disabled controls. `set` answered 200 and the next inventory showed the new status and
+  comment; `sleep` answered 200 and closed the workspace's terminals; `close` answered 200, the
+  terminal list became empty and the worktree remained. `history` on macbook answered 200 for page
+  1 and page 2, each 50 distinct sessions with a working cursor (an earlier run paged four distinct
+  pages of 50 through the Gateway's parser), and `transcript` answered 200 with 164 entries.
+- `create` from the 390 px panel with no explicit model (agent default) created the worktree
+  `mobile-final-proof` with one agent terminal; the next inventory showed branch
+  `feat/mobile-final-proof` and one connected, writable terminal. `send` to that terminal answered
+  200 `accepted` at stage `input-accepted`, with a warning that delivery is unproven; resending the
+  exact same body and request id answered 200 with an identical response. The saved transcript
+  then held exactly four entries: the create prompt, `MOBILE_FINAL_OK`, the sent text and
+  `MOBILE_REPLAY_OK`. So create and send started real turns in this fixture, and the duplicate
+  request id added no third prompt or reply: the input was delivered once end to end.
+- `resume`: an exact OMP session in the disposable `mobile-final-proof` worktree was found by
+  search; its `transcript` answered 200 with 4 normalized entries. After `close` answered 200,
+  `resume` answered 200 `accepted` in the same worktree with a new canonical terminal handle. This
+  proves the resume terminal was launched, not that a turn started.
+- Browser: the full e2e campaign on the final Gateway source passed 70 of 70 at 390 and 411 px
+  viewports (all 6 e2e files, 65 s). An earlier focused run passed 8 of 8, including create with the
+  model omitted versus an explicit model kept across a reordered catalog. A 1440 px desktop
+  screenshot showed no horizontal overflow.
+
+**Not verified:** a turn starting after `resume`; turn start after `create` or `send` beyond this
+one fixture; `transcript` and
+`resume` on a host whose index is off (they fall back to the exact agent and session id, and for
+`resume` to an `omp` session in a registered worktree; `history` there answers
+`409 unsupported` by design); the
+candidate at the public `https://omp.shipmate.bot` origin (the retained Chrome now reaches it
+signed in, titled OMP Sessions, but it still serves the previous production pin); Access
+revocation on a real device; app badge and end-of-turn Push on iPhone; and the deployed
+HarnessOS/Gateway pair. Nothing here is Supported or Qualified.
+
 ## Platforms and browsers
 
 Use OMP Session Gateway from a modern browser, and install it as a PWA where the platform supports

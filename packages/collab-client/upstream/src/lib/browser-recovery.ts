@@ -1,3 +1,4 @@
+import { isAuthorizationDeniedResponse } from "../embed-contract";
 import type { PathHealth } from "./client";
 
 const HEALTHY_PROBE_INTERVAL_MS = 15_000;
@@ -55,6 +56,13 @@ const INITIAL_HEALTH: PathHealth = {
  * Measure the same-origin gateway path and refresh a potentially half-open
  * relay transport after browser or radio path changes. Network APIs are only
  * triggers; HTTP probe results are the source of truth.
+ *
+ * The probe goes through the same edge as the page, with manual redirects and
+ * the AJAX marker, so an expired or revoked Access session surfaces as 401 or
+ * an opaque login redirect instead of a followed HTML login page. A refusal is
+ * terminal for this installation: `onAuthorizationDenied` fires once and no
+ * probe, refresh, or relay measurement runs again. Timeouts, network errors,
+ * and 5xx stay on the transient retry path.
  */
 export function installBrowserConnectionRecovery(
 	refreshConnection: () => void,
@@ -62,9 +70,11 @@ export function installBrowserConnectionRecovery(
 	onHealthChange: (health: PathHealth) => void = () => {},
 	remeasureRelay: () => void = refreshConnection,
 	setRelayProbesPaused: (paused: boolean) => void = () => {},
+	onAuthorizationDenied: () => void = () => {},
 ): () => void {
 	const isHidden = (): boolean => environment.document.visibilityState === "hidden";
 	let disposed = false;
+	let denied = false;
 	let health = INITIAL_HEALTH;
 	let consecutiveFailures = 0;
 	let recoverySuccesses = 0;
@@ -108,7 +118,7 @@ export function installBrowserConnectionRecovery(
 	};
 	const scheduleProbe = (delay: number, exposeRetry = false): void => {
 		clearProbeTimer();
-		if (disposed || isHidden()) return;
+		if (disposed || denied || isHidden()) return;
 		if (exposeRetry) publish({ ...health, retryAt: environment.now() + delay });
 		probeTimer = environment.window.setTimeout(() => {
 			probeTimer = undefined;
@@ -129,19 +139,23 @@ export function installBrowserConnectionRecovery(
 		scheduleProbe(DEGRADED_PROBE_INTERVAL_MS);
 	};
 	const probeGateway = async (): Promise<void> => {
-		if (disposed || probeInFlight || isHidden()) return;
+		if (disposed || denied || probeInFlight || isHidden()) return;
 		probeInFlight = true;
 		const startedAt = environment.now();
 		const controller = new AbortController();
 		probeController = controller;
 		const timeout = environment.window.setTimeout(() => controller.abort(), probeTimeout());
 		let healthy = false;
+		let refused = false;
 		try {
 			const response = await environment.fetch("/api/v1/health", {
 				cache: "no-store",
 				credentials: "same-origin",
+				headers: { "X-Requested-With": "XMLHttpRequest" },
+				redirect: "manual",
 				signal: controller.signal,
 			});
+			refused = isAuthorizationDeniedResponse(response);
 			healthy = response.ok;
 		} catch {
 			// A radio handoff can leave navigator.onLine true while this probe times out.
@@ -150,7 +164,16 @@ export function installBrowserConnectionRecovery(
 			if (probeController === controller) probeController = undefined;
 			probeInFlight = false;
 		}
-		if (disposed || isHidden()) return;
+		if (disposed || denied) return;
+		if (refused) {
+			// Even a probe superseded by hide/offline carries a real refusal; act on it now.
+			denied = true;
+			clearProbeTimer();
+			setRelayProbesPaused(true);
+			onAuthorizationDenied();
+			return;
+		}
+		if (isHidden()) return;
 		if (supersededProbes.has(controller)) {
 			const runImmediately = probeRequested;
 			probeRequested = false;
@@ -206,6 +229,7 @@ export function installBrowserConnectionRecovery(
 		else scheduleNextProbe();
 	};
 	const requestProbe = (): void => {
+		if (denied) return;
 		relayCheckRequested = true;
 		clearProbeTimer();
 		if (probeInFlight) {

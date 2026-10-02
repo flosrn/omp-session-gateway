@@ -1,0 +1,288 @@
+/* Live-session directory: grouping, activity facts, workspace. Roles come from styles.css (which
+   maps the collab client's tokens); nothing here holds a color of its own. Every control is at
+   least 44px tall, and every line wraps or truncates inside the row so 390px and 411px phones never
+   scroll sideways. */
+
+.activity-directory {
+  display: grid;
+  gap: 0.6rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.activity-group-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.activity-group-picker-label {
+  margin-right: 0.15rem;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.activity-group-option {
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  padding: 0.4rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--body);
+  background: none;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.activity-group-option[aria-pressed="true"] {
+  border-color: var(--border-strong);
+  color: var(--ink);
+  background: var(--surface);
+}
+
+.activity-group-option:active {
+  background: var(--surface-press);
+}
+
+.activity-group {
+  display: grid;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.activity-group-toggle {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0.35rem 0.25rem;
+  border: 0;
+  color: var(--ink);
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.activity-group-toggle:active {
+  background: var(--surface-press);
+}
+
+.activity-group-chevron {
+  display: inline-block;
+  color: var(--muted);
+  transform: rotate(90deg);
+}
+
+.activity-group[data-collapsed="true"] .activity-group-chevron {
+  transform: none;
+}
+
+.activity-group-label {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 0.86rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-group-count {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.activity-group-rows {
+  display: grid;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+/* Facts live inside the native row button, under its title and details. */
+.activity-facts {
+  display: grid;
+  gap: 0.28rem;
+  min-width: 0;
+  margin-top: 0.4rem;
+  color: var(--body);
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+
+.activity-facts > span {
+  min-width: 0;
+}
+
+.activity-last-known {
+  justify-self: start;
+  padding: 0.05rem 0.4rem;
+  border: 1px dashed var(--border-strong);
+  border-radius: 999px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.activity-stale .activity-preview,
+.activity-stale .activity-meters,
+.activity-stale .activity-workspace,
+.activity-stale .activity-comment {
+  color: var(--faint);
+}
+
+.activity-stale .activity-gauge-fill {
+  background: var(--faint);
+}
+
+.activity-now {
+  display: flex;
+  gap: 0.4rem;
+  min-width: 0;
+  color: var(--ink);
+}
+
+.activity-tool {
+  flex: none;
+  max-width: 45%;
+  overflow: hidden;
+  color: var(--live);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-intent {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-preview,
+.activity-comment {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.activity-comment {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.activity-meters,
+.activity-workspace {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.6rem;
+  min-width: 0;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-gauge {
+  position: relative;
+  flex: 0 0 4.5rem;
+  height: 0.32rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--border);
+}
+
+.activity-gauge-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--live);
+}
+
+.activity-branch {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--body);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-status {
+  padding: 0 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 0.3rem;
+}
+
+.activity-unread {
+  padding: 0 0.35rem;
+  border-radius: 0.3rem;
+  color: var(--control-bright);
+  background: var(--control-wash);
+  font-weight: 600;
+}
+
+/* Sits beside the row button inside .working-row-frame, before Hide. */
+.activity-pr {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  padding: 0 0.45rem;
+  border-radius: 0.45rem;
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.activity-pr:active {
+  background: var(--surface-press);
+}
+
+@media (max-width: 25.6875rem) {
+  /* 411px and narrower: facts stack, the gauge shortens. */
+  .activity-gauge {
+    flex-basis: 3.5rem;
+  }
+
+  .activity-tool {
+    max-width: 40%;
+  }
+}
+
+@media (max-width: 24.375rem) {
+  /* 390px and narrower: give the row text the width; the PR chip stays a 44px target. */
+  .activity-group-picker-label {
+    flex-basis: 100%;
+  }
+
+  .activity-pr {
+    padding-inline: 0.25rem;
+  }
+
+  .activity-now {
+    flex-wrap: wrap;
+  }
+
+  .activity-tool {
+    max-width: 100%;
+  }
+}

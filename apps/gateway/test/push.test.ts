@@ -328,7 +328,7 @@ describe("Web Push service", () => {
     await service.stop();
   });
 
-  test("prioritizes asks at the stop edge and when an ask overtakes queued stop delivery", async () => {
+  test("prioritizes asks, and ends a turn that ran through an answered ask once it idles", async () => {
     const root = await createRoot();
     let requests = 0;
     const registry = new SessionRegistry({
@@ -346,8 +346,9 @@ describe("Web Push service", () => {
     sample(true, true);
     sample(false, false);
     await service.flush();
+    // The turn was working before the ask; answering and idling ends it, after the clear.
     expect(transport.calls.map(call => parseAttentionPushMessage(JSON.parse(call.payload)).type)).toEqual([
-      "attention", "attention", "clear",
+      "attention", "attention", "clear", "activity_stop",
     ]);
 
     transport.blockWhen = () => true;
@@ -360,7 +361,7 @@ describe("Web Push service", () => {
     transport.blockWhen = undefined;
     release();
     await service.flush();
-    const messages = transport.calls.slice(3).map(call => parseAttentionPushMessage(JSON.parse(call.payload)));
+    const messages = transport.calls.slice(4).map(call => parseAttentionPushMessage(JSON.parse(call.payload)));
     expect(messages.map(message => message.type)).toEqual([
       "attention", "clear", "attention",
     ]);

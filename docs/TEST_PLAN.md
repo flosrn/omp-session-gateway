@@ -9,16 +9,61 @@ qualify the mainline integration.
 ## Activity extension scenarios
 
 - Mixed current/legacy host snapshots: busy true/false, missing/null unknown, malformed rejection.
-- Known true-to-false only on continuing identity/generation, neither sample waiting for input.
+- A stop only after an observed working turn on a continuing identity/generation is next sampled
+  idle; the working latch survives a mid-turn ask, and the current sample is never waiting.
 - No stops from first idle, repeated idle, retained/query gaps, unknown, replacements, removal,
   expiry, or restart; activity knowledge changes never extend TTL.
 - Ordered internal delivery and reentrancy; queued stop ABA invalidation; no internal event in SSE.
-- View-only stop eligibility; no history replay on subscribe/renew; all three server privacy levels.
+- View-only stop eligibility (Control on a View-less fleet card); no history replay on
+  subscribe/renew; all three server privacy levels.
 - Shared tag, no Web Push `Topic`, displayed ask priority, and request-specific clear cannot close a stop.
 - Strict scrubbed routes, same-generation View-only launch, changed/gone targets, and no new secret sinks.
 - Real built browser activity labels, notification navigation, and existing supported viewport layouts.
 
 These are implementation checks, not a physical-device or background-delivery qualification claim.
+
+## Private fleet path scenarios (ADR-033, ADR-034)
+
+- Annotations: exact keys, every bound and the unsafe-text set refused; `null` stays unknown,
+  never zero; bridge `null` accepted as absent; an annotation change is a registry revision; a
+  stale machine keeps "Last known" facts; ids and paths never reach visible text.
+- Directory: Working first, then `activity.at` (else `startedAt`); Project/Machine grouping,
+  collapse and their persistence; no overflow at phone widths.
+- Workspace route: Origin/Fetch-Site, content type, rate window, missing federation, 64 KiB body
+  (413), malformed body with and without a salvageable id, unknown host before any bridge call,
+  authorization revalidated after the reply.
+- Workspace replies: every operation's exact shape and caps; foreign host inside `data`;
+  mismatched request id; non-JSON, redirect, undeclared status; read fault → `503`, write fault →
+  `504 outcome-unknown`; disconnected terminal never writable.
+- Panel: stale reads stay visible and marked; late replies for another host/tab/query dropped;
+  writes never aborted or auto-resent; an uncertain write blocks a new write in its slot until an
+  explicit Retry (identical body and id) or a "checked the machine" clear, and an ordinary dismiss
+  does not release it; a refused Retry (`429`, `404`) keeps it uncertain; the automatic update
+  reload waits for every pending or uncertain write to be confirmed or cleared, and a manual
+  sign-in reload asks first; close needs confirmation;
+  only cosmetic preferences reach storage. A bridge `401` surfaces as `503 token-refused` and a
+  bridge `403` as `409`, never as authorization loss; a real Access `401` still revokes the page.
+  Before-relay `401 unauthorized` / `403 forbidden` envelopes mark a write failed; a `503` is
+  definitive only with `X-OMP-Workspace-Outcome: not-run` and a parsed envelope, and any unmarked
+  `503` stays uncertain; the after-relay `401 authentication_required` keeps the write uncertain and
+  ends authorization; a refused Retry stays uncertain even with the marker. The panel closes before
+  a directory snapshot, session entry or restore replaces the page, without losing receipts; it is
+  hidden for an empty fleet; an aborted tab read clears its loading state; a quick-reply double
+  tap sends once. The session switcher updates unchanged rows in place, so a tap during streaming
+  lands on the row it was aimed at.
+- Dedupe (HarnessOS): pending join, remembered answer, `request-conflict` for a changed target,
+  receipt replay, interrupted write → `outcome-unknown`, durable-id send replay.
+- Authorization loss from snapshot, SSE, workspace call, or the client's health probe (401, 403,
+  opaque redirect) disposes the transport, drops a pending ask answer, disables composer and panel,
+  clears the badge; timeouts and network errors do not.
+- Badge: page and worker apply the Control-able pending-ask count, serialized, feature-detected,
+  cleared at zero and on authorization loss.
+- Leak scans: no preview, transcript, bearer, assertion or capability in storage, caches, logs or
+  artifacts.
+
+Before calling a deployment working, exercise each read and write operation on a real machine
+through an authenticated browser at the public origin. Record the result as Tested evidence in
+[COMPATIBILITY.md](COMPATIBILITY.md#private-flosrn-fork-evidence).
 
 ## 1. Unit tests
 

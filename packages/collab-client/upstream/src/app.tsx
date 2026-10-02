@@ -68,6 +68,10 @@ export function App({ capability, onDispose, embedOptions }: AppProps): ReactNod
 	const [client, setClient] = useState<GuestClient | null>(initialConnection?.client ?? null);
 	const [connectError, setConnectError] = useState<string | null>(initialConnection?.error ?? null);
 	const credsRef = useRef<Creds | null>(initialConnection?.creds ?? null);
+	// A refusal outlives the refused client: Rejoin reuses the same launch, not fresh authorization.
+	const authorizationDeniedRef = useRef(false);
+	const embedOptionsRef = useRef(embedOptions);
+	embedOptionsRef.current = embedOptions;
 
 	const connect = useCallback((link: string, name: string): void => {
 		let next: GuestClient;
@@ -103,7 +107,7 @@ export function App({ capability, onDispose, embedOptions }: AppProps): ReactNod
 
 	const rejoin = useCallback((): void => {
 		const creds = credsRef.current;
-		if (creds) connect(creds.link, creds.name);
+		if (creds && !authorizationDeniedRef.current) connect(creds.link, creds.name);
 	}, [connect]);
 
 	// Visual Viewport: adjust app height to fit screen space when mobile keyboard opens.
@@ -154,6 +158,12 @@ export function App({ capability, onDispose, embedOptions }: AppProps): ReactNod
 			health => client.setGatewayHealth(health),
 			() => client.remeasureRelay(),
 			paused => client.setRelayProbesPaused(paused),
+			() => {
+				// Close the transport before the host hears about it, so nothing queued can leave.
+				authorizationDeniedRef.current = true;
+				client.refuseAuthorization();
+				embedOptionsRef.current?.onAuthorizationDenied?.();
+			},
 		);
 		let unsubscribe = (): void => {};
 		const stop = (): void => {

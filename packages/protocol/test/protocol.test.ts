@@ -25,6 +25,10 @@ import {
   observedSessionFromFleet,
   parseFleetBridgeSnapshot,
   parseFleetLinkOutcome,
+  sameDirectoryAnnotations,
+  cloneSessionMetadata,
+  type SessionActivity,
+  type SessionWorkspace,
   type SessionEvent,
   type SessionListResponse,
   type SessionMetadata,
@@ -563,5 +567,169 @@ describe("fleet directory contract", () => {
     expect(outcome.capability.reveal()).toBe(url);
     expect(parseFleetLinkOutcome({ error: "stale-generation" })).toEqual({ ok: false, error: "stale-generation" });
     expect(() => parseFleetLinkOutcome({ error: "stale-generation", url })).toThrow(ProtocolValidationError);
+  });
+});
+
+describe("session activity and workspace contract", () => {
+  const fleetId = "e".repeat(64);
+  const activity: SessionActivity = {
+    at: 1_790_000_000_000,
+    tool: "edit",
+    intent: "Updating parser",
+    preview: "Parser now carries activity",
+    contextTokens: 41_200,
+    contextWindow: 200_000,
+    cost: 1.2345,
+    subagents: 2,
+  };
+  const workspace: SessionWorkspace = {
+    id: "repo::wt-1",
+    path: "/workspace/host/repo",
+    project: "omp-session-gateway",
+    branch: "feat/session-tools",
+    comment: "integrating",
+    status: "in-review",
+    unread: true,
+    pr: "https://github.com/flosrn/omp-session-gateway/pull/42",
+  };
+  const bridgeSession = {
+    instanceId: "native-2",
+    generation: 4,
+    sessionId: "s-2",
+    title: null,
+    pid: 11,
+    cwd: "/workspace/host/repo",
+    model: null,
+    roomSince: 0,
+    state: "working",
+    guests: 0,
+    relayConnected: true,
+    tmuxSession: null,
+    canControl: true,
+  };
+  const bridge = (session: object, status = "live") => ({
+    hosts: [{ host: "vps", source: "hub", status, ageSeconds: status === "never" ? null : 1, error: null, sessions: [session] }],
+  });
+  const project = (session: object, status = "live") => {
+    const parsed = parseFleetBridgeSnapshot(bridge(session, status));
+    return observedSessionFromFleet(parsed.hosts[0]!, parsed.hosts[0]!.sessions[0]!, fleetId)!;
+  };
+
+  test("a legacy bridge session without annotations still projects, and reports none", () => {
+    const observed = project(bridgeSession);
+    expect(observed).not.toHaveProperty("activity");
+    expect(observed).not.toHaveProperty("workspace");
+    // A hub that nulls the field is treated as not reporting it, not as zero activity.
+    expect(project({ ...bridgeSession, activity: null, workspace: null })).not.toHaveProperty("activity");
+  });
+
+  test("activity and workspace survive bridge → observed → browser metadata → list parsing", () => {
+    const observed = project({ ...bridgeSession, activity, workspace });
+    const { metadata: projected } = sessionMetadataFromObserved(observed, "2026-10-01T00:00:01.000Z");
+    expect(projected.activity).toEqual(activity);
+    expect(projected.workspace).toEqual(workspace);
+    const wire = JSON.parse(JSON.stringify({ revision: 1, sessions: [projected] }));
+    expect(parseSessionListResponse(wire).sessions[0]).toEqual(projected);
+  });
+
+  test("a stale machine keeps its last known activity but never claims busy", () => {
+    const observed = project({ ...bridgeSession, activity }, "stale");
+    const { metadata: projected } = sessionMetadataFromObserved(observed, "2026-10-01T00:00:01.000Z");
+    expect(projected).not.toHaveProperty("busy");
+    expect(projected).toMatchObject({ available: false, hostStatus: "stale", activity });
+    expect(parseSessionListResponse(JSON.parse(JSON.stringify({ revision: 1, sessions: [projected] }))).sessions[0])
+      .toEqual(projected);
+  });
+
+  test("unknown activity values stay null instead of becoming zero", () => {
+    const unknown = { at: null, tool: null, intent: null, preview: null, contextTokens: null, contextWindow: null, cost: null, subagents: null };
+    expect(project({ ...bridgeSession, activity: unknown }).activity).toEqual(unknown);
+    const zero = { ...unknown, cost: 0, subagents: 0 };
+    expect(project({ ...bridgeSession, activity: zero }).activity).toEqual(zero);
+  });
+
+  test.each([
+    ["missing key", (() => { const { cost: _cost, ...rest } = activity; return rest; })()],
+    ["extra key", { ...activity, raw: "x" }],
+    ["NaN cost", { ...activity, cost: Number.NaN }],
+    ["negative cost", { ...activity, cost: -0.01 }],
+    ["negative zero cost", { ...activity, cost: -0 }],
+    ["infinite cost", { ...activity, cost: Number.POSITIVE_INFINITY }],
+    ["negative tokens", { ...activity, contextTokens: -1 }],
+    ["fractional tokens", { ...activity, contextTokens: 1.5 }],
+    ["negative window", { ...activity, contextWindow: -1 }],
+    ["negative subagents", { ...activity, subagents: -1 }],
+    ["string count", { ...activity, subagents: "2" }],
+    ["time past TimeClip", { ...activity, at: 8_640_000_000_000_001 }],
+    ["long tool", { ...activity, tool: "t".repeat(65) }],
+    ["long intent", { ...activity, intent: "i".repeat(161) }],
+    ["long preview", { ...activity, preview: "p".repeat(241) }],
+    ["empty tool", { ...activity, tool: "" }],
+    ["bidi override", { ...activity, preview: "safe\u202Etxt" }],
+    ["control character", { ...activity, intent: "line\u0007" }],
+    ["tab", { ...activity, intent: "a\tb" }],
+    ["newline", { ...activity, preview: "line\nbreak" }],
+    ["carriage return", { ...activity, preview: "line\rbreak" }],
+    ["C1 control", { ...activity, tool: "a\u0085b" }],
+    ["bidi mark", { ...activity, preview: "a\u200Fb" }],
+    ["array", [activity]],
+  ])("refuses activity with a %s", (_label, value) => {
+    expect(() => parseFleetBridgeSnapshot(bridge({ ...bridgeSession, activity: value }))).toThrow(ProtocolValidationError);
+    expect(() => parseSessionListResponse({ revision: 1, sessions: [metadata({ activity: value })] }))
+      .toThrow(ProtocolValidationError);
+  });
+
+  test("activity at the exact bounds is accepted", () => {
+    const edge = { ...activity, tool: "t".repeat(64), intent: "i".repeat(160), preview: "p".repeat(240), at: 8_640_000_000_000_000 };
+    expect(project({ ...bridgeSession, activity: edge }).activity).toEqual(edge);
+  });
+
+  test.each([
+    ["missing unread", (() => { const { unread: _unread, ...rest } = workspace; return rest; })()],
+    ["string unread", { ...workspace, unread: "true" }],
+    ["extra key", { ...workspace, terminal: "t" }],
+    ["empty project", { ...workspace, project: "" }],
+    ["null id", { ...workspace, id: null }],
+    ["long id", { ...workspace, id: "i".repeat(1_025) }],
+    ["long path", { ...workspace, path: "/".repeat(513) }],
+    ["long project", { ...workspace, project: "p".repeat(129) }],
+    ["long branch", { ...workspace, branch: "b".repeat(257) }],
+    ["long comment", { ...workspace, comment: "c".repeat(513) }],
+    ["long status", { ...workspace, status: "s".repeat(65) }],
+    ["long pr", { ...workspace, pr: "https://github.com/" + "x".repeat(1_006) }],
+    ["control in comment", { ...workspace, comment: "a\u0000b" }],
+  ])("refuses a workspace with %s", (_label, value) => {
+    expect(() => parseFleetBridgeSnapshot(bridge({ ...bridgeSession, workspace: value }))).toThrow(ProtocolValidationError);
+    expect(() => parseSessionListResponse({ revision: 1, sessions: [metadata({ workspace: value })] }))
+      .toThrow(ProtocolValidationError);
+  });
+
+  test("the browser wire omits rather than nulls an annotation", () => {
+    expect(() => parseSessionListResponse({ revision: 1, sessions: [metadata({ activity: null })] }))
+      .toThrow(ProtocolValidationError);
+    expect(parseSessionListResponse({ revision: 1, sessions: [metadata()] }).sessions[0]).not.toHaveProperty("activity");
+  });
+
+  test("annotation equality notices every rendered field and ignores identity of copies", () => {
+    const base = { activity, workspace };
+    expect(sameDirectoryAnnotations(base, { activity: { ...activity }, workspace: { ...workspace } })).toBeTrue();
+    expect(sameDirectoryAnnotations({}, {})).toBeTrue();
+    expect(sameDirectoryAnnotations(base, { workspace })).toBeFalse();
+    for (const key of Object.keys(activity) as (keyof SessionActivity)[]) {
+      const changed = { ...activity, [key]: key === "tool" || key === "intent" || key === "preview" ? "other" : null } as SessionActivity;
+      expect(sameDirectoryAnnotations(base, { activity: changed, workspace })).toBeFalse();
+    }
+    for (const key of Object.keys(workspace) as (keyof SessionWorkspace)[]) {
+      const changed = { ...workspace, [key]: key === "unread" ? false : key === "branch" || key === "comment" || key === "status" || key === "pr" ? null : "other" } as SessionWorkspace;
+      expect(sameDirectoryAnnotations(base, { activity, workspace: changed })).toBeFalse();
+    }
+  });
+
+  test("a cloned record shares no nested object with its source", () => {
+    const source = parseSessionListResponse({ revision: 1, sessions: [metadata({ activity, workspace })] }).sessions[0]!;
+    const clone = cloneSessionMetadata(source);
+    expect(clone).toEqual(source);
+    expect(clone.activity).not.toBe(source.activity);
+    expect(clone.workspace).not.toBe(source.workspace);
   });
 });

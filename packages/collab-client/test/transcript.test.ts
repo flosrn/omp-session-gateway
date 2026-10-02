@@ -349,6 +349,85 @@ describe("photo source chooser", () => {
   });
 });
 
+describe("quick replies", () => {
+  test("a rapid double tap sends one prompt, and a later tap after the echo sends again", async () => {
+    const prompts: string[] = [];
+    const guest = new FakeGuest(guestSnapshot({ phase: "live" }));
+    const client = {
+      ...guest.client,
+      sendPrompt(text: string): void {
+        prompts.push(text);
+      },
+    } as unknown as GuestClient;
+    const tree = await mount(
+      createElement(Composer, {
+        client,
+        snapshot: guest.getSnapshot(),
+        embedded: true,
+        quickReplies: ["oui", "go"],
+      }),
+    );
+    const chip = queryAll(tree.container, "sh-quick-reply")[0];
+    if (chip === undefined) throw new Error("quick reply did not render");
+    expect(chip.getAttribute("disabled")).toBeNull();
+
+    await click(chip);
+    await click(chip);
+    expect(prompts).toEqual(["oui"]);
+    expect(chip.getAttribute("disabled")).toBe("");
+
+    await tree.render(
+      createElement(Composer, {
+        client,
+        snapshot: guestSnapshot({
+          phase: "live",
+          entries: [{
+            id: "echo-oui",
+            parentId: null,
+            timestamp: "2026-07-25T00:00:02.000Z",
+            type: "custom_message",
+            customType: "collab-prompt",
+            content: [{ type: "text", text: "oui" }],
+            details: { from: "guest" },
+            display: true,
+          }],
+        }),
+        embedded: true,
+        quickReplies: ["oui", "go"],
+      }),
+    );
+    const settled = queryAll(tree.container, "sh-quick-reply")[0];
+    if (settled === undefined) throw new Error("quick reply disappeared after its echo");
+    expect(settled.getAttribute("disabled")).toBeNull();
+    await click(settled);
+    expect(prompts).toEqual(["oui", "oui"]);
+
+    const asking = guestSnapshot({
+      phase: "live",
+      uiRequest: {
+        reqId: 9,
+        kind: "select",
+        title: "Ship it?",
+        options: [{ label: "Yes" }],
+        initialIndex: 0,
+        selectionMarker: "radio",
+      },
+    });
+    await tree.render(createElement(Composer, { client, snapshot: asking, embedded: true, quickReplies: ["oui"] }));
+    expect(queryAll(tree.container, "sh-quick-reply")).toEqual([]);
+    await tree.render(
+      createElement(Composer, {
+        client,
+        snapshot: guestSnapshot({ phase: "live", readOnly: true }),
+        embedded: true,
+        quickReplies: ["oui"],
+      }),
+    );
+    expect(queryAll(tree.container, "sh-quick-reply")).toEqual([]);
+    expect(prompts).toEqual(["oui", "oui"]);
+  });
+});
+
 describe("embedded session first paint", () => {
   test("returns a reader to the transcript tail when a recovered connection becomes live", async () => {
     const guest = new FakeGuest(guestSnapshot({ phase: "live", entries: userEntries(200) }));

@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
+  cloneSessionMetadata,
+  sameDirectoryAnnotations,
   sessionMetadataFromObserved,
   type FleetDirectoryStatus,
   type FleetHostSummary,
@@ -28,6 +30,12 @@ interface InternalMetadataRecord {
   immutableIdentity: string;
   receivedAtMs: number;
   activityStopRevision: number | undefined;
+  /**
+   * A continuing turn was observed working (`busy: true` outside an ask) and has not yet been
+   * observed idle. Private: it survives a mid-turn ask, which hides `busy`, so answering and going
+   * idle still raises the stop. Any unknown reading, gap, or replacement clears it.
+   */
+  turnWorking: boolean;
 }
 
 /** Gateway-private edge notification; never part of the browser SessionEvent stream. */
@@ -61,10 +69,6 @@ const systemClock: RegistryClock = {
   wallNowIso: () => new Date().toISOString(),
 };
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/u;
-
-function cloneMetadata(metadata: SessionMetadata): SessionMetadata {
-  return { ...metadata, ...(metadata.ask === undefined ? {} : { ask: { ...metadata.ask } }) };
-}
 
 function cloneHosts(hosts: readonly FleetHostSummary[]): FleetHostSummary[] {
   return hosts.map(host => ({ ...host }));
@@ -145,7 +149,7 @@ export class SessionRegistry {
     return {
       revision: this.#revision,
       sessions: [...this.#metadata.values()]
-        .map(record => cloneMetadata(record.metadata))
+        .map(record => cloneSessionMetadata(record.metadata))
         .sort((left, right) => right.startedAt.localeCompare(left.startedAt)),
       ...directoryFields(this.#hosts, this.#fleetStatus),
     };
@@ -333,30 +337,38 @@ export class SessionRegistry {
       existing.metadata = metadata;
       return "updated";
     }
-    const stopped = continues && existing.metadata.busy === true && metadata.busy === false &&
-      !existing.metadata.inputRequired && !metadata.inputRequired;
+    // Only an observed working turn can end. An ask hides `busy`, so the latch carries the turn
+    // across it; a reading that is neither working, asking, nor idle is unknown and breaks it.
+    const asking = metadata.inputRequired;
+    const working = !asking && metadata.busy === true;
+    const idle = !asking && metadata.busy === false;
+    const latched = continues && existing.turnWorking;
+    const stopped = latched && idle;
+    const turnWorking = working || (asking && latched);
     this.#revision += 1;
     this.#metadata.set(input.instanceId, {
       metadata,
       immutableIdentity: projected.immutableIdentity,
       receivedAtMs,
       activityStopRevision: stopped ? this.#revision :
-        continues && metadata.busy === false && !metadata.inputRequired ? existing.activityStopRevision : undefined,
+        continues && idle ? existing.activityStopRevision : undefined,
+      turnWorking,
     });
     this.#emit(
-      { type: "session_upsert", revision: this.#revision, session: cloneMetadata(metadata) },
-      stopped ? { type: "activity_stop", revision: this.#revision, session: cloneMetadata(metadata) } : undefined,
+      { type: "session_upsert", revision: this.#revision, session: cloneSessionMetadata(metadata) },
+      stopped ? { type: "activity_stop", revision: this.#revision, session: cloneSessionMetadata(metadata) } : undefined,
     );
     return existing === undefined ? "inserted" : "updated";
   }
 
   #forgetActivity(record: InternalMetadataRecord): void {
+    record.turnWorking = false;
     if (record.metadata.busy === undefined) return;
     const { busy: _busy, ...metadata } = record.metadata;
     record.metadata = metadata;
     record.activityStopRevision = undefined;
     this.#revision += 1;
-    this.#emit({ type: "session_upsert", revision: this.#revision, session: cloneMetadata(metadata) });
+    this.#emit({ type: "session_upsert", revision: this.#revision, session: cloneSessionMetadata(metadata) });
   }
 
   /**
@@ -373,10 +385,11 @@ export class SessionRegistry {
       available: false,
     };
     record.activityStopRevision = undefined;
+    record.turnWorking = false;
     if (this.#unchanged(record.metadata, metadata)) return;
     record.metadata = metadata;
     this.#revision += 1;
-    this.#emit({ type: "session_upsert", revision: this.#revision, session: cloneMetadata(metadata) });
+    this.#emit({ type: "session_upsert", revision: this.#revision, session: cloneSessionMetadata(metadata) });
   }
 
   /** Compares everything a browser renders, ignoring the liveness stamp that moves every poll. */
@@ -395,7 +408,8 @@ export class SessionRegistry {
       left.host === right.host &&
       left.originalInstanceId === right.originalInstanceId &&
       left.hostStatus === right.hostStatus &&
-      left.available === right.available
+      left.available === right.available &&
+      sameDirectoryAnnotations(left, right)
     );
   }
 
@@ -418,7 +432,7 @@ export class SessionRegistry {
     ) {
       return { status: "request_mismatch" };
     }
-    return { status: "ok", session: cloneMetadata(record.metadata) };
+    return { status: "ok", session: cloneSessionMetadata(record.metadata) };
   }
 
   sweepExpired(): number {
@@ -449,11 +463,11 @@ export class SessionRegistry {
   #notify<T extends SessionEvent | SessionActivityStopEvent>(event: T, listeners: ReadonlySet<(event: T) => void>): void {
     for (const listener of listeners) {
       try {
-        const copy = "session" in event ? { ...event, session: cloneMetadata(event.session) }
+        const copy = "session" in event ? { ...event, session: cloneSessionMetadata(event.session) }
           : event.type === "snapshot"
             ? {
                 ...event,
-                sessions: event.sessions.map(cloneMetadata),
+                sessions: event.sessions.map(cloneSessionMetadata),
                 ...(event.hosts === undefined ? {} : { hosts: cloneHosts(event.hosts) }),
               }
             : { ...event };

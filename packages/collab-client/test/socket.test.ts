@@ -1,6 +1,7 @@
 import type { AssistantMessage, HostFrame, SessionEntry, SessionHeader, SessionState } from "@oh-my-pi/pi-wire";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { GuestClient } from "../upstream/src/lib/client.ts";
+import { installBrowserConnectionRecovery, type BrowserRecoveryEnvironment } from "../upstream/src/lib/browser-recovery.ts";
 import { CollabSocket } from "../upstream/src/lib/socket.ts";
 import { importRoomKey, open } from "../upstream/src/lib/codec.ts";
 import { COLLAB_PROTO, encodeBase64Url, parseCollabLink, unpackEnvelope } from "../upstream/src/lib/link.ts";
@@ -727,5 +728,119 @@ describe("Collaboration link error redaction", () => {
     const parsed = parseCollabLink(`://invalid/${capability}`);
     expect("error" in parsed).toBeTrue();
     expect(JSON.stringify(parsed)).not.toContain(capability);
+  });
+});
+
+describe("Guest transport after gateway authorization refusal", () => {
+  function recoveryEnvironment(probe: () => Promise<Response>): {
+    environment: BrowserRecoveryEnvironment;
+    runProbe(): Promise<void>;
+  } {
+    const timers = new Map<number, () => void>();
+    let nextTimer = 0;
+    const window = Object.assign(new EventTarget(), {
+      setTimeout(callback: () => void): number {
+        timers.set(++nextTimer, callback);
+        return nextTimer;
+      },
+      clearTimeout(handle: number): void {
+        timers.delete(handle);
+      },
+    });
+    const document = Object.assign(new EventTarget(), { visibilityState: "visible" as DocumentVisibilityState });
+    return {
+      environment: { connection: undefined, document, window, now: () => 0, random: () => 0.5, fetch: probe },
+      async runProbe(): Promise<void> {
+        // The first timer is the scheduled probe; the timeout timer it arms is cleared on settle.
+        const [handle, callback] = [...timers.entries()][0] ?? [];
+        if (handle === undefined || callback === undefined) throw new Error("no probe is scheduled");
+        timers.delete(handle);
+        callback();
+        for (let tick = 0; tick < 8; tick += 1) await Promise.resolve();
+      },
+    };
+  }
+
+  async function liveControlGuest(): Promise<{ client: GuestClient; socket: FakeWebSocket; key: CryptoKey }> {
+    const client = new GuestClient(TEST_CONTROL_LINK, "test guest");
+    client.connect();
+    const socket = FakeWebSocket.instances[0];
+    if (socket === undefined) throw new Error("initial WebSocket was not created");
+    socket.open();
+    await socket.waitForSent(1);
+    client.applyFrameForTest(TEST_WELCOME);
+    expect(client.getSnapshot().phase).toBe("live");
+    client.sendPrompt("before refusal");
+    await socket.waitForSent(2);
+    return { client, socket, key: await importRoomKey(new Uint8Array(32)) };
+  }
+
+  test("a 401 after a valid welcome closes the transport and no further prompt frame leaves", async () => {
+    const { client, socket, key } = await liveControlGuest();
+    const denials: string[] = [];
+    const probe = recoveryEnvironment(async () => new Response(null, { status: 401 }));
+    const dispose = installBrowserConnectionRecovery(
+      () => client.refreshConnection(),
+      probe.environment,
+      health => client.setGatewayHealth(health),
+      () => client.remeasureRelay(),
+      paused => client.setRelayProbesPaused(paused),
+      () => {
+        client.refuseAuthorization();
+        denials.push(client.getSnapshot().phase);
+      },
+    );
+    // Sealing is asynchronous: this frame is still in flight when the refusal lands.
+    client.sendPrompt("in flight at refusal");
+    await probe.runProbe();
+
+    expect(denials).toEqual(["ended"]);
+    expect(client.getSnapshot()).toMatchObject({ phase: "ended", endedReason: "authorization refused" });
+    expect(socket.readyState).toBe(FakeWebSocket.CLOSED);
+
+    client.sendPrompt("after refusal");
+    client.sendAbort();
+    client.sendAgentCmd("chat", "agent-1", "after refusal");
+    expect(await client.fetchTranscript("agent-1", 0)).toBeNull();
+    client.connect();
+    client.refreshConnection();
+    // The frame sealing at refusal cannot leave either: close() voided its transport generation.
+
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect((await decodeFrames(socket, key)).map(frame => [frame.t, frame.text])).toEqual([
+      ["hello", undefined],
+      ["prompt", "before refusal"],
+    ]);
+    dispose();
+  });
+
+  test.each(["network", 503] as const)("a %s probe failure keeps the live transport sending", async failure => {
+    const { client, socket, key } = await liveControlGuest();
+    const denials: string[] = [];
+    const probe = recoveryEnvironment(async () => {
+      if (failure === "network") throw new TypeError("Failed to fetch");
+      return new Response(null, { status: failure });
+    });
+    const dispose = installBrowserConnectionRecovery(
+      () => client.refreshConnection(),
+      probe.environment,
+      health => client.setGatewayHealth(health),
+      () => client.remeasureRelay(),
+      paused => client.setRelayProbesPaused(paused),
+      () => {
+        client.refuseAuthorization();
+        denials.push("denied");
+      },
+    );
+    await probe.runProbe();
+
+    expect(denials).toEqual([]);
+    expect(client.getSnapshot().phase).toBe("live");
+    expect(client.getSnapshot().gatewayHealth.state).toBe("degraded");
+    client.sendPrompt("still allowed");
+    await socket.waitForSent(3);
+    expect((await decodeFrames(socket, key)).at(-1)).toMatchObject({ t: "prompt", text: "still allowed" });
+    dispose();
+    client.close();
   });
 });

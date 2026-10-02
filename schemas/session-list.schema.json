@@ -3,6 +3,51 @@
   "$id": "https://example.invalid/omp-session-gateway/session-list.schema.json",
   "title": "OMP Session Gateway metadata-only session list",
   "type": "object",
+  "$defs": {
+    "annotationText": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]+$"
+    },
+    "nullableCount": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+      ]
+    },
+    "activity": {
+      "description": "Last known activity. null is unknown, never zero; kept as last known on a stale machine.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["at", "tool", "intent", "preview", "contextTokens", "contextWindow", "cost", "subagents"],
+      "properties": {
+        "at": { "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": 0, "maximum": 8640000000000000 }] },
+        "tool": { "anyOf": [{ "type": "null" }, { "type": "string", "$ref": "#/$defs/annotationText", "maxLength": 64 }] },
+        "intent": { "anyOf": [{ "type": "null" }, { "type": "string", "$ref": "#/$defs/annotationText", "maxLength": 160 }] },
+        "preview": { "anyOf": [{ "type": "null" }, { "type": "string", "$ref": "#/$defs/annotationText", "maxLength": 240 }] },
+        "contextTokens": { "$ref": "#/$defs/nullableCount" },
+        "contextWindow": { "$ref": "#/$defs/nullableCount" },
+        "cost": { "anyOf": [{ "type": "null" }, { "type": "number", "minimum": 0 }] },
+        "subagents": { "$ref": "#/$defs/nullableCount" }
+      }
+    },
+    "workspace": {
+      "description": "Exactly matched Orca workspace. id and path identify it for actions and are never rendered.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "path", "project", "branch", "comment", "status", "unread", "pr"],
+      "properties": {
+        "id": { "type": "string", "$ref": "#/$defs/annotationText", "maxLength": 1024 },
+        "path": { "type": "string", "$ref": "#/$defs/annotationText", "maxLength": 512 },
+        "project": { "type": "string", "$ref": "#/$defs/annotationText", "maxLength": 128 },
+        "branch": { "anyOf": [{ "type": "null" }, { "type": "string", "$ref": "#/$defs/annotationText", "maxLength": 256 }] },
+        "comment": { "anyOf": [{ "type": "null" }, { "type": "string", "$ref": "#/$defs/annotationText", "maxLength": 512 }] },
+        "status": { "anyOf": [{ "type": "null" }, { "type": "string", "$ref": "#/$defs/annotationText", "maxLength": 64 }] },
+        "unread": { "type": "boolean" },
+        "pr": { "anyOf": [{ "type": "null" }, { "type": "string", "$ref": "#/$defs/annotationText", "maxLength": 1024 }] }
+      }
+    }
+  },
   "additionalProperties": false,
   "required": [
     "revision",
@@ -115,7 +160,9 @@
           },
           "available": {
             "type": "boolean"
-          }
+          },
+          "activity": { "$ref": "#/$defs/activity" },
+          "workspace": { "$ref": "#/$defs/workspace" }
         },
         "dependentRequired": {
           "host": ["originalInstanceId", "hostStatus", "available"],

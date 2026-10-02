@@ -1048,3 +1048,45 @@ unit/connector and Phase secrets. No OMP engine or relay changes are needed. Loc
 viewport observations are Tested only; upstream release and physical-device qualification does
 not transfer to this Access/federation variant.
 
+---
+
+## ADR-034 — Extend the private fleet path to activity and Orca workspace operations
+
+**Status:** Accepted for this private fork; deployment qualification pending
+
+**Context:** On the phone, Flo needs to see what each fleet session is doing and act on its Orca
+workspace — find, read and resume past sessions, send to a terminal, create, annotate, sleep and
+close workspaces — without a desktop. The upstream boundary (directory and capability broker only,
+no terminal injection or saved-session reading) cannot provide that, and HarnessOS already holds
+the authenticated host inventory and the Mac's operator channel that reaches Orca on every host.
+Flo explicitly authorized the wider boundary for this fork; upstream is not asked to adopt it.
+
+**Decision:** Keep the Gateway a validating relay; put all reading and execution in HarnessOS.
+
+- Fleet cards carry optional HarnessOS `activity` and Orca `workspace` annotations, read by
+  HarnessOS from the host's own session files and Orca. Unknown stays `null`; Orca state never
+  replaces OMP `busy`/`inputRequired`.
+- One `POST /api/v1/workspace` carries ten typed operations. The Gateway authenticates (Access,
+  exact Origin, rate window), checks strict shapes and the host against the fleet listing, relays
+  once over the private bridge and revalidates the reply and authorization. HarnessOS re-checks
+  the host against its inventory and runs only fixed Orca argv or five named Orca runtime RPCs
+  from the Mac operator. The Gateway never reads session files, scrapes terminals, or builds a
+  shell command; no client text names a path, command, environment or method.
+- Writes are at most once per request id: no automatic retry, `outcome-unknown` for a lost
+  reply, durable operator receipts that leave a permanent guard per request id, and Orca's
+  durable prompt id for `send`.
+- On authorization loss the page disposes its own collaboration transport and locks the panel.
+  This is local; OMP room rotation remains the only revocation of a delivered capability.
+
+**Deployment and rollback:** HarnessOS pins the Gateway's full commit and delivers its own hub and
+operator; the two move as a pair. The Gateway's bridge parser is exact, so the Gateway that
+understands annotations is readied first and HarnessOS starts emitting them second; rollback
+reverses the pair (HarnessOS to its previous pin, then the Gateway pin). A Gateway rolled back
+alone against an annotating hub sees the fleet as unreachable.
+
+**Consequences:** The signed-in directory and workspace replies now carry session-derived text
+(previews, transcripts, workspace paths); they stay `no-store`, out of browser storage and logs,
+and only the allowlisted owner receives them. The standalone `tailscale-serve` path is unchanged:
+without `federation` the route answers `503` and no annotation appears. Upstream release and
+device qualification does not transfer; this path is Tested until qualified on its own evidence.
+

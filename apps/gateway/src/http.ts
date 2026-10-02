@@ -23,6 +23,7 @@ import type { PushService } from "./push.ts";
 
 import { StaticAssetStore } from "./static.ts";
 import type { LaunchResolution } from "./omp-registry.ts";
+import { MAX_WORKSPACE_BODY_BYTES, type createWorkspaceApi } from "./workspace.ts";
 
 /**
  * The launch side of the OMP reader, narrowed to what HTTP needs. Keeping it an interface means the
@@ -103,11 +104,29 @@ function problem(status: number, code: string, message: string): Response {
     true,
   );
 }
+/** A workspace refusal in the `{ ok: false, error }` shape the mobile client reads. */
+function workspaceRefusal(status: number, error: string): Response {
+  return withSecurityHeaders(Response.json({ ok: false, error }, { status }), true);
+}
 function authenticationRefusal(
   mode: GatewayConfig["auth"]["mode"],
   reason: Extract<AuthorizationResult, { allowed: false }>["reason"],
   peer: RequestPeer | undefined,
+  workspace: boolean,
 ): Response {
+  if (workspace) {
+    // Refused before any relay: the existing workspace envelope, never problem+json.
+    // Nothing was relayed, so a write certainly did not run; only this reply carries the marker.
+    if (mode === "cloudflare-access" && reason === "keys_unavailable") {
+      const refused = workspaceRefusal(503, "unavailable");
+      refused.headers.set("X-OMP-Workspace-Outcome", "not-run");
+      return refused;
+    }
+    if (mode === "cloudflare-access" && reason === "unauthorized" && peer !== undefined && isLoopbackAddress(peer.address)) {
+      return workspaceRefusal(401, "unauthorized");
+    }
+    return workspaceRefusal(403, "forbidden");
+  }
   if (mode !== "cloudflare-access") return problem(403, "forbidden", "Forbidden");
   if (reason === "keys_unavailable") return problem(503, "retry_later", "Try again shortly");
   // Missing, invalid, or expired assertions are the only Access refusals a new sign-in can fix.
@@ -118,11 +137,12 @@ function authenticationRefusal(
   return problem(403, "forbidden", "Forbidden");
 }
 
+class RequestBodyTooLargeError extends ProtocolValidationError {}
+
 async function readBoundedBody(request: Request, maximumBytes: number): Promise<Uint8Array> {
   const declared = request.headers.get("Content-Length");
-  if (declared !== null && (!/^\d+$/u.test(declared) || Number(declared) > maximumBytes)) {
-    throw new ProtocolValidationError();
-  }
+  if (declared !== null && !/^\d+$/u.test(declared)) throw new ProtocolValidationError();
+  if (declared !== null && Number(declared) > maximumBytes) throw new RequestBodyTooLargeError();
   if (request.body === null) throw new ProtocolValidationError();
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -132,7 +152,7 @@ async function readBoundedBody(request: Request, maximumBytes: number): Promise<
       const result = await reader.read();
       if (result.done) break;
       total += result.value.byteLength;
-      if (total > maximumBytes) throw new ProtocolValidationError();
+      if (total > maximumBytes) throw new RequestBodyTooLargeError();
       chunks.push(result.value);
     }
   } catch (error) {
@@ -276,6 +296,7 @@ export function createHttpHandler(options: {
   readonly launchResolver: LaunchBroker;
   readonly staticAssets: StaticAssetStore;
   readonly pushService?: PushService;
+  readonly workspaceApi?: ReturnType<typeof createWorkspaceApi>;
   readonly logger?: SafeLogger;
   readonly readinessToken?: string;
   readonly readinessInstance?: string;
@@ -303,9 +324,8 @@ export function createHttpHandler(options: {
   const { config, registry, staticAssets, launchResolver } = options;
   const logger = options.logger ?? new SafeLogger();
   const identityCapacity = config.auth.mode === "dev-localhost" ? 1 : config.auth.allowedLogins.length;
-  // Each admitted identity can own exactly two keys (`launch` and `push`), so configured identities
-  // can never deny one another merely by filling the bounded map.
-  const limiter = new LaunchRateLimiter(20, 60_000, Math.max(2, identityCapacity * 2));
+  // Each admitted identity owns bounded launch, push and workspace rate windows.
+  const limiter = new LaunchRateLimiter(20, 60_000, Math.max(3, identityCapacity * 3));
   const now = options.now ?? Date.now;
   const tailnetPresent = options.tailnetPresent ?? createTailnetPresenceProbe();
   // Built once so the remote key set and its rotation cache are shared by every request.
@@ -398,7 +418,7 @@ export function createHttpHandler(options: {
         identity_untrustworthy: authorization.reason === "identity_untrustworthy",
         keys_unavailable: authorization.reason === "keys_unavailable",
       });
-      return authenticationRefusal(config.auth.mode, authorization.reason, peer);
+      return authenticationRefusal(config.auth.mode, authorization.reason, peer, url.pathname === "/api/v1/workspace" && request.method === "POST");
     }
     if (healthRoute) {
       // The collab client probes this route to judge the Gateway path while a session is open; a
@@ -420,6 +440,40 @@ export function createHttpHandler(options: {
         options.sseKeepaliveMs,
         revalidate ?? (() => config.auth.mode !== "tailscale-serve" || identityTrustDeclared || tailnetPresent()),
       );
+    }
+    if (url.pathname === "/api/v1/workspace" && request.method === "POST") {
+      if (!requestHasValidMutationContext(request, config.http.publicOrigin) || request.headers.get("Sec-Fetch-Site") !== "same-origin") {
+        return workspaceRefusal(403, "forbidden");
+      }
+      if (request.headers.get("Content-Type")?.toLowerCase() !== "application/json") {
+        return workspaceRefusal(400, "invalid-request");
+      }
+      if (!limiter.allow(`${authorization.identityKey}\0workspace`, now())) {
+        return workspaceRefusal(429, "rate-limited");
+      }
+      if (options.workspaceApi === undefined) {
+        return workspaceRefusal(503, "unavailable");
+      }
+      let bytes: Uint8Array;
+      try {
+        bytes = await readBoundedBody(request, MAX_WORKSPACE_BODY_BYTES);
+      } catch (error) {
+        const tooLarge = error instanceof RequestBodyTooLargeError;
+        return tooLarge ? workspaceRefusal(413, "too-large") : workspaceRefusal(400, "invalid-request");
+      }
+      let body: unknown;
+      try {
+        body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+      } catch {
+        return workspaceRefusal(400, "invalid-request");
+      }
+      const answer = await options.workspaceApi.handle(body);
+      if (authorization.revalidate !== undefined) {
+        let stillAdmitted = false;
+        try { stillAdmitted = await authorization.revalidate(); } catch { /* Refuse unreadable authorization. */ }
+        if (!stillAdmitted) return problem(401, "authentication_required", "Sign in again");
+      }
+      return withSecurityHeaders(Response.json(answer.body, { status: answer.status }), true);
     }
     if (url.pathname === "/api/v1/push/config" && request.method === "GET" && options.pushService !== undefined) {
       return withSecurityHeaders(Response.json(options.pushService.configResponse()), true);
@@ -554,6 +608,7 @@ export function startHttpServer(options: {
   readonly launchResolver: LaunchBroker;
   readonly staticAssets: StaticAssetStore;
   readonly pushService?: PushService;
+  readonly workspaceApi?: ReturnType<typeof createWorkspaceApi>;
   readonly logger?: SafeLogger;
   readonly readinessToken: string;
   readonly readinessInstance?: string;

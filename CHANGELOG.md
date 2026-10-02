@@ -37,9 +37,43 @@ The format is based on Keep a Changelog and Semantic Versioning.
   `n/m` counter and previous/next stepping that scrolls each match into view. It searches every
   loaded entry and widens the `Show earlier` window when the oldest match is not yet rendered;
   Escape closes and clears it.
+- Unify the open session and the directory as one OMP shell: one session bar (back, title over
+  the working directory, the client's context gauge and agents toggle, Control, connection state),
+  OMP's agents rail and per-agent transcript drawer, OMP's design tokens for both, a
+  System/Dark/Light theme setting shared with the client, and Rejoin for a room that closes while
+  its session is still listed.
+- In the private fleet variant, show HarnessOS activity on each card: last preview, tool and
+  intent while working, a context gauge (tokens alone when the window is unknown), cumulative
+  cost, subagent count, and the Orca workspace's branch, comment, status, unread mark and PR.
+  Unknown facts are omitted, never zero; a stale machine's facts read "Last known". Working
+  sessions sort Working first, then by last activity, grouped by project or machine in collapsible
+  groups.
+- In the private fleet variant, add a workspace panel over the new `POST /api/v1/workspace` RPC:
+  Orca workspaces and terminals with send, search, past-session history with a read-only
+  transcript and resume, create, and status/comment/sleep/close with confirmation. Writes are
+  never retried automatically; a lost reply shows as uncertain and blocks a new write in that slot
+  until the user retries the same body and request id or confirms they checked the machine. A
+  refused Retry keeps it uncertain, an app update waits to reload until no workspace write is
+  pending or uncertain, and a manual sign-in reload asks for confirmation first. A write refused
+  before it reaches the machine (Access refusal, or unavailable signing keys marked
+  `X-OMP-Workspace-Outcome: not-run`) shows as not run; a refusal after the relay stays uncertain.
+  The workspace panel closes cleanly when the page swaps the directory or a session in, keeping
+  every write receipt; it is hidden when the fleet has no machines; a tab whose read was aborted no
+  longer stays loading; and a quick reply sends once on a double tap.
+- The session switcher keeps its rows in place while the directory streams: a row is rebuilt only
+  when its title, machine, availability, generation, section or pending ask changes, so a tap is
+  no longer lost to a redraw.
+- Show the pending-ask count on the installed app icon from the open page as well as from Push.
 
 ### Changed
 
+- Raise an activity-stop notification when a turn ends after a mid-turn question is answered:
+  the registry now carries an observed working turn across the ask.
+- On authorization loss (401, 403 or an Access login redirect from the directory, a workspace
+  call, or the open client's health probe), close the page's collaboration transport, drop queued
+  frames, disable the composer and workspace panel, and clear the badge until a fresh sign-in.
+  This does not revoke the delivered capability for other holders; rotate the OMP room for that.
+- An activity-stop tap on a View-less fleet card opens Control for the same generation.
 - Move the OMP engineering baseline to published v18.4.8. Its collaboration host source and
   `collab-web` are byte-identical to v18.4.2, so the embedded client and its `@oh-my-pi/pi-wire`
   18.4.2 pin are unchanged. The Mac, Debian, and Windows qualification lanes now build stock OMP
@@ -54,6 +88,10 @@ The format is based on Keep a Changelog and Semantic Versioning.
 - Re-arm a Push phase after its one permitted foreign-notification overlap by waiting only for
   pending attention clears, then dismissing remaining owned notices. An activity-stop notice has
   no clear and previously held the re-arm until its 160-second timeout.
+- Behind Cloudflare Access, answer the signed-in browser's `/api/v1/health` probe, so an open
+  session no longer shows "Gateway unavailable" while its relay works.
+- Reconnect the directory silently: "Gateway unavailable" appears only after a 3-second grace
+  from the first visible drop, never for a hidden page.
 
 ## [v0.7.1] — 2026-09-30
 

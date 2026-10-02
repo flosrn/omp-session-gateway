@@ -30,7 +30,7 @@ import {
   stageRuntimePayload,
 } from "./installation.ts";
 import { OmpHostReader, OmpLaunchResolver, startHostPoller, type HostPoller } from "./omp-registry.ts";
-import { startFleetFederation, type FleetFederation } from "./federation.ts";
+import { FleetBridgeClient, startFleetFederation, type FleetFederation } from "./federation.ts";
 import { SafeLogger } from "./logger.ts";
 import { PushService } from "./push.ts";
 import { SessionRegistry } from "./registry.ts";
@@ -44,6 +44,7 @@ import {
   userServiceStatus,
 } from "./service.ts";
 import { StaticAssetStore } from "./static.ts";
+import { createWorkspaceApi } from "./workspace.ts";
 
 interface ParsedArguments {
   readonly command: string;
@@ -217,6 +218,10 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
       onEvent: (event, detail) => logger.event("info", event, detail),
     });
     const launchResolver = fleet ?? new OmpLaunchResolver({ registry, reader: reader! });
+    const workspaceApi = config.federation === undefined ? undefined : createWorkspaceApi({
+      bridge: new FleetBridgeClient({ socketPath: config.federation.socketPath, tokenFile: config.federation.tokenFile }),
+      isAuthorizedHost: host => registry.snapshot().hosts?.some(machine => machine.host === host) === true,
+    });
     poller = reader === undefined ? undefined : startHostPoller({
       reader,
       registry,
@@ -230,6 +235,7 @@ async function runServe(arguments_: ParsedArguments): Promise<void> {
       staticAssets,
       logger,
       pushService,
+      ...(workspaceApi === undefined ? {} : { workspaceApi }),
       readinessToken: token,
       ...(readinessInstance === undefined ? {} : { readinessInstance }),
       endpointHealthy: () => fleet?.healthy ?? poller?.discoveryHealthy ?? false,

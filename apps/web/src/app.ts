@@ -17,9 +17,10 @@ import {
   type SessionMetadata,
   type PushDetailLevel,
 } from "@omp-session-gateway/protocol";
-import type {
-  CollabEmbedOptions,
-  CollabEmbedState,
+import {
+  isAuthorizationDeniedResponse,
+  type CollabEmbedOptions,
+  type CollabEmbedState,
 } from "../../../packages/collab-client/upstream/src/embed-contract";
 import {
   DEFAULT_QUICK_REPLIES,
@@ -28,6 +29,9 @@ import {
   resetQuickReplies,
   writeQuickReplies,
 } from "./quick-replies.ts";
+import { createWorkspacePanel } from "./workspace-panel.ts";
+import { appendActivityFacts, orderWorkingSessions, renderActivityDirectory } from "./activity-directory.ts";
+import { pendingAskCount, syncAppBadge } from "./app-badge.ts";
 
 type PathHealth = CollabEmbedState["gatewayHealth"];
 
@@ -212,6 +216,7 @@ let updateReloadTimeout: number | undefined;
 let pendingDismissToast: PendingDismissToast | undefined;
 /** Fleet machines from the latest snapshot; `undefined` on a standalone gateway. */
 let hosts: readonly FleetHostSummary[] | undefined;
+let workspacePanel: ReturnType<typeof createWorkspacePanel> | undefined;
 /**
  * Directory-level fleet reachability. Absent means a standalone gateway or a fleet listing that
  * has not said; `"unreachable"` is a bridge that has never produced a directory, not an empty one.
@@ -254,6 +259,7 @@ interface ActiveCollabShell {
   readonly triageBar: HTMLElement;
   readonly shell: HTMLElement;
   readonly switcher: HTMLDialogElement;
+  revokeTransport(): void;
   answerShown: boolean;
   answerTriageVisible: boolean;
   triageTimeout?: number;
@@ -415,6 +421,7 @@ function applyActivatedWorkerUpdate(): void {
     !workerUpdatePending ||
     pendingLaunches > 0 ||
     pendingNotificationRoute ||
+    workspacePanel?.hasUnsettledWrites() === true ||
     activeCollabShell !== undefined ||
     location.pathname === "/client/"
   ) {
@@ -621,7 +628,7 @@ function setStatus(kind: StatusKind, message: string): void {
 function isSignInRequired(response: Response): boolean {
   // `redirect: "manual"` turns a login redirect that slipped past the AJAX header into
   // `opaqueredirect` rather than a cross-origin failure indistinguishable from an outage.
-  return response.status === 401 || response.status === 403 || response.type === "opaqueredirect";
+  return isAuthorizationDeniedResponse(response);
 }
 
 function signInCopy(response: Response): string {
@@ -632,6 +639,7 @@ function signInCopy(response: Response): string {
 
 /** Only ever called from an explicit tap: the navigation lets the access proxy renew the session. */
 function reloadToSignIn(): void {
+  if (workspacePanel?.hasUnsettledWrites() === true && !window.confirm("A workspace action is pending or its outcome is unknown. Check the machine before starting it again. Sign in now and leave this receipt?")) return;
   location.reload();
 }
 
@@ -643,6 +651,9 @@ function reloadToSignIn(): void {
  */
 function enterAuthorizationDenied(message: string): void {
   authorizationDenied = true;
+  selectionSequence += 1;
+  void syncAppBadge(0);
+  workspacePanel?.setAuthorized(false);
   directoryEpoch += 1;
   snapshotController?.abort();
   snapshotController = undefined;
@@ -1213,12 +1224,7 @@ function orderedHeldSessions(): SessionMetadata[] {
 }
 
 function orderedWorkingSessions(): SessionMetadata[] {
-  return [...sessions.values()]
-    .filter(session => !session.inputRequired && !isDismissed(session))
-    .sort((left, right) => {
-      const started = right.startedAt.localeCompare(left.startedAt);
-      return started === 0 ? left.instanceId.localeCompare(right.instanceId) : started;
-    });
+  return orderWorkingSessions([...sessions.values()].filter(session => !session.inputRequired && !isDismissed(session)));
 }
 
 function orderedDismissedSessions(): SessionMetadata[] {
@@ -1404,24 +1410,31 @@ function createWorkingRow(session: SessionMetadata): HTMLElement {
   return frame;
 }
 
-function createWaitingRow(session: SessionMetadata): HTMLButtonElement {
+function createWaitingRow(session: SessionMetadata): HTMLElement {
   const mode = primaryMode(session);
+  const frame = document.createElement("div");
+  frame.className = "queue-row-frame";
   const button = document.createElement("button");
   button.type = "button";
   button.className = "queue-row";
   button.dataset.instanceId = session.instanceId;
   button.disabled = mode === undefined;
   button.setAttribute("aria-label", rowActionLabel(session, mode, "Open request in"));
+  const copy = document.createElement("span");
+  copy.className = "queue-copy";
+  copy.append(createTextElement("span", "row-title", sessionTitle(session)));
   button.append(
     createTextElement("span", "row-dot row-dot-waiting", ""),
-    createTextElement("span", "row-title", sessionTitle(session)),
+    copy,
     createTextElement("span", "row-time", queueRowDetail(session)),
     createTextElement("span", "row-chevron", "›"),
   );
   button.addEventListener("click", () => {
     if (mode !== undefined) void launch(session, mode, button, mode === "control" ? session.ask?.requestId : undefined);
   });
-  return button;
+  frame.append(button);
+  appendActivityFacts(frame, session, document, { factsRoot: copy, actionRoot: button });
+  return frame;
 }
 
 function createHeldRow(session: SessionMetadata): HTMLElement {
@@ -1435,9 +1448,12 @@ function createHeldRow(session: SessionMetadata): HTMLElement {
   open.className = "held-open";
   open.disabled = mode === undefined;
   open.setAttribute("aria-label", rowActionLabel(session, mode, "Open held request in"));
+  const copy = document.createElement("span");
+  copy.className = "held-copy";
+  copy.append(createTextElement("span", "row-title", sessionTitle(session)));
   open.append(
     createTextElement("span", "row-dot row-dot-held", ""),
-    createTextElement("span", "row-title", sessionTitle(session)),
+    copy,
     createTextElement("span", "row-time", queueRowDetail(session)),
   );
   open.addEventListener("click", () => {
@@ -1451,6 +1467,7 @@ function createHeldRow(session: SessionMetadata): HTMLElement {
   requeue.setAttribute("aria-label", `Return ${sessionTitle(session)} to the queue`);
   requeue.addEventListener("click", () => requeueHeldSession(session));
   row.append(open, requeue);
+  appendActivityFacts(row, session, document, { factsRoot: copy, actionRoot: open });
   return row;
 }
 
@@ -1463,45 +1480,100 @@ function switchRowDetail(session: SessionMetadata): string {
   return values.join(" · ") || "Live OMP session";
 }
 
-function createSwitchRow(shell: ActiveCollabShell, session: SessionMetadata, dot: string): HTMLButtonElement {
-  const mode = primaryMode(session);
+function createSwitchRow(shell: ActiveCollabShell, session: SessionMetadata): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "switch-row";
   button.dataset.instanceId = session.instanceId;
+  const copy = document.createElement("span");
+  copy.className = "switch-copy";
+  copy.append(
+    createTextElement("span", "row-title", ""),
+    createTextElement("span", "switch-detail", ""),
+  );
+  button.append(
+    createTextElement("span", "row-dot", ""),
+    copy,
+    createTextElement("span", "row-chevron", "›"),
+  );
+  button.addEventListener("click", () => {
+    const instanceId = button.dataset.instanceId;
+    const current = instanceId === undefined ? undefined : sessions.get(instanceId);
+    const mode = current === undefined ? undefined : primaryMode(current);
+    if (current === undefined || mode === undefined) return;
+    shell.switcher.close();
+    // Same launch as the directory row: a waiting question opens straight onto its request.
+    void launch(current, mode, undefined, mode === "control" && current.inputRequired ? current.ask?.requestId : undefined);
+  });
+  syncSwitchRow(button, session, "working");
+  return button;
+}
+
+type SwitcherSection = "waiting" | "held" | "working";
+
+/** Dialog identity, not shell state: a reused row must survive an unchanged directory frame. */
+const switcherRenderKey = new WeakMap<HTMLDialogElement, string>();
+
+function switcherSectionDot(section: SwitcherSection): string {
+  if (section === "waiting") return "row-dot-waiting";
+  if (section === "held") return "row-dot-held";
+  return "row-dot-live";
+}
+
+function switcherRows(shell: ActiveCollabShell): { session: SessionMetadata; section: SwitcherSection }[] {
+  const others = (list: readonly SessionMetadata[]): SessionMetadata[] =>
+    list.filter(session => session.instanceId !== shell.instanceId);
+  return [
+    ...others(orderedWaitingSessions()).map(session => ({ session, section: "waiting" as const })),
+    ...others(orderedHeldSessions()).map(session => ({ session, section: "held" as const })),
+    ...others(orderedWorkingSessions()).map(session => ({ session, section: "working" as const })),
+  ];
+}
+
+/** Visible row, launch target, and disabled state. Order is the joined sequence, not a timestamp. */
+function switcherRowKey(session: SessionMetadata, section: SwitcherSection): string {
+  const mode = primaryMode(session);
+  const dot = isAvailable(session) ? switcherSectionDot(section) : "row-dot-unavailable";
+  return [
+    session.instanceId,
+    section,
+    String(session.generation),
+    session.ask?.requestId ?? "",
+    sessionTitle(session),
+    switchRowDetail(session),
+    dot,
+    mode ?? "disabled",
+    rowActionLabel(session, mode, session.inputRequired ? "Open request in" : "Control"),
+  ].join("\u001f");
+}
+
+function switcherContentKey(shell: ActiveCollabShell): string {
+  const rows = switcherRows(shell);
+  const kickers = [
+    rows.some(row => row.section !== "working") ? "needs" : "",
+    rows.some(row => row.section === "working") ? "live" : "",
+  ];
+  return `${kickers.join("\u001e")}\u001e${rows.map(row => switcherRowKey(row.session, row.section)).join("\u001e")}`;
+}
+
+function syncSwitchRow(button: HTMLButtonElement, session: SessionMetadata, section: SwitcherSection): void {
+  const mode = primaryMode(session);
   button.disabled = mode === undefined;
   button.setAttribute(
     "aria-label",
     rowActionLabel(session, mode, session.inputRequired ? "Open request in" : "Control"),
   );
-  const copy = document.createElement("span");
-  copy.className = "switch-copy";
-  copy.append(
-    createTextElement("span", "row-title", sessionTitle(session)),
-    createTextElement("span", "switch-detail", switchRowDetail(session)),
-  );
-  button.append(
-    createTextElement("span", isAvailable(session) ? `row-dot ${dot}` : "row-dot row-dot-unavailable", ""),
-    copy,
-    createTextElement("span", "row-chevron", "›"),
-  );
-  button.addEventListener("click", () => {
-    if (mode === undefined) return;
-    shell.switcher.close();
-    // Same launch as the directory row: a waiting question opens straight onto its request.
-    void launch(session, mode, undefined, mode === "control" && session.inputRequired ? session.ask?.requestId : undefined);
-  });
-  return button;
+  const dot = button.querySelector(".row-dot");
+  if (dot !== null) dot.className = isAvailable(session) ? `row-dot ${switcherSectionDot(section)}` : "row-dot row-dot-unavailable";
+  const title = button.querySelector(".row-title");
+  if (title !== null) title.textContent = sessionTitle(session);
+  const detail = button.querySelector(".switch-detail");
+  if (detail !== null) detail.textContent = switchRowDetail(session);
 }
 
-/** The directory's own order without leaving the session: needs-you first, then live work. */
-function renderSessionSwitcher(shell: ActiveCollabShell): void {
-  const others = (list: readonly SessionMetadata[]): SessionMetadata[] =>
-    list.filter(session => session.instanceId !== shell.instanceId);
-  const waiting = others(orderedWaitingSessions());
-  const held = others(orderedHeldSessions());
-  const working = others(orderedWorkingSessions());
-
+function ensureSwitcherChrome(shell: ActiveCollabShell): HTMLElement {
+  const existing = shell.switcher.querySelector<HTMLElement>(".switch-list");
+  if (existing !== null) return existing;
   const header = document.createElement("header");
   const heading = document.createElement("div");
   heading.append(
@@ -1515,22 +1587,69 @@ function renderSessionSwitcher(shell: ActiveCollabShell): void {
   close.setAttribute("aria-label", "Close session switcher");
   close.addEventListener("click", () => shell.switcher.close());
   header.append(heading, close);
-
   const list = document.createElement("div");
   list.className = "switch-list";
-  if (waiting.length + held.length > 0) {
-    list.append(createQueueKicker("Needs you"));
-    for (const session of waiting) list.append(createSwitchRow(shell, session, "row-dot-waiting"));
-    for (const session of held) list.append(createSwitchRow(shell, session, "row-dot-held"));
+  shell.switcher.append(createTextElement("div", "notification-sheet-handle", ""), header, list);
+  return list;
+}
+
+function switcherKicker(list: HTMLElement, className: string, label: string): HTMLElement {
+  const existing = list.querySelector<HTMLElement>(`.${className}`);
+  if (existing !== null) return existing;
+  const kicker = createQueueKicker(label);
+  kicker.className = `${kicker.className} ${className}`;
+  return kicker;
+}
+
+function placeSwitcherChild(list: HTMLElement, child: HTMLElement, index: number): void {
+  if (list.children[index] === child) return;
+  list.insertBefore(child, list.children[index] ?? null);
+}
+
+/** Moves existing rows. replaceChildren would drop a finger that is already on one. */
+function reconcileSwitcherList(
+  list: HTMLElement,
+  shell: ActiveCollabShell,
+  rows: readonly { session: SessionMetadata; section: SwitcherSection }[],
+): void {
+  const buttons = new Map<string, HTMLButtonElement>();
+  for (const button of list.querySelectorAll<HTMLButtonElement>(".switch-row")) {
+    const id = button.dataset.instanceId;
+    if (id !== undefined) buttons.set(id, button);
   }
-  if (working.length > 0) {
-    list.append(createQueueKicker("Live sessions"));
-    for (const session of working) list.append(createSwitchRow(shell, session, "row-dot-live"));
+  const desired: HTMLElement[] = [];
+  if (rows.length === 0) {
+    desired.push(list.querySelector<HTMLElement>(".switch-empty") ?? createTextElement("p", "switch-empty", "No other live sessions."));
+  } else {
+    let needs = false;
+    let live = false;
+    for (const row of rows) {
+      if ((row.section === "waiting" || row.section === "held") && !needs) {
+        needs = true;
+        desired.push(switcherKicker(list, "switch-kicker-needs", "Needs you"));
+      }
+      if (row.section === "working" && !live) {
+        live = true;
+        desired.push(switcherKicker(list, "switch-kicker-live", "Live sessions"));
+      }
+      const button = buttons.get(row.session.instanceId) ?? createSwitchRow(shell, row.session);
+      buttons.delete(row.session.instanceId);
+      syncSwitchRow(button, row.session, row.section);
+      desired.push(button);
+    }
   }
-  if (list.childElementCount === 0) {
-    list.append(createTextElement("p", "switch-empty", "No other live sessions."));
+  for (const child of [...list.children]) {
+    if (!(child instanceof HTMLElement) || !desired.includes(child)) child.remove();
   }
-  shell.switcher.replaceChildren(createTextElement("div", "notification-sheet-handle", ""), header, list);
+  for (const [index, child] of desired.entries()) placeSwitcherChild(list, child, index);
+}
+
+/** The directory's own order without leaving the session: needs-you first, then live work. */
+function renderSessionSwitcher(shell: ActiveCollabShell): void {
+  const key = switcherContentKey(shell);
+  if (switcherRenderKey.get(shell.switcher) === key && shell.switcher.querySelector(".switch-list") !== null) return;
+  switcherRenderKey.set(shell.switcher, key);
+  reconcileSwitcherList(ensureSwitcherChrome(shell), shell, switcherRows(shell));
 }
 
 function appendDismissedControl(dismissed: readonly SessionMetadata[]): void {
@@ -1628,7 +1747,7 @@ function renderAllClear(
   sessionList.append(summary);
   if (working.length > 0) {
     sessionList.append(createQueueKicker("Live sessions"));
-    for (const session of working) sessionList.append(createWorkingRow(session));
+    renderActivityDirectory(sessionList, working, { renderRow: createWorkingRow });
   }
   appendDismissedControl(dismissed);
 }
@@ -1676,6 +1795,7 @@ function renderWaitingQueue(
       createSessionSummary(hero),
       askPreview,
     );
+    appendActivityFacts(article, hero);
 
     const heroMode = primaryMode(hero);
     const primary = document.createElement("button");
@@ -1721,13 +1841,14 @@ function renderWaitingQueue(
   }
   if (working.length > 0) {
     sessionList.append(createQueueKicker(`Live sessions · ${working.length}`));
-    for (const session of working) sessionList.append(createWorkingRow(session));
+    renderActivityDirectory(sessionList, working, { renderRow: createWorkingRow });
   }
   appendDismissedControl(dismissed);
   appendHostSummary();
 }
 
 function render(): void {
+  void syncAppBadge(authorizationDenied ? 0 : pendingAskCount([...sessions.values()]));
   if (activeCollabShell !== undefined) return;
   sessionList.replaceChildren();
   if (!directoryLoaded) {
@@ -1887,6 +2008,7 @@ function signInTriageVisible(shell: ActiveCollabShell): boolean {
 }
 
 function showSignInInShell(shell: ActiveCollabShell, message: string): void {
+  shell.revokeTransport();
   shell.answerShown = true;
   clearConnectionTimers(shell);
   setConnectionState(shell.connectionChip, "offline", "Sign in required");
@@ -2046,6 +2168,17 @@ async function resolvePendingResume(): Promise<void> {
 }
 
 /**
+ * A modal dropped by replaceChildren keeps `open` but leaves the top layer. Close first so the
+ * next Workspaces tap calls showModal again. The controller, and any write receipt, stays.
+ */
+function closeWorkspacePanelForBodySwap(): void {
+  if (workspacePanel?.dialog.open === true) workspacePanel.close();
+}
+
+function attachWorkspacePanel(): void {
+  if (workspacePanel !== undefined) document.body.append(workspacePanel.dialog);
+}
+/**
  * Restores the cached directory DOM synchronously — a caller that has already disposed a client
  * cannot be left waiting behind an inert shell — and resolves once the refreshed snapshot has
  * landed, so a resume can decide against current metadata rather than the pre-background copy.
@@ -2062,8 +2195,10 @@ function restoreDirectory(historyValue?: unknown): Promise<boolean> {
   disposeActiveCollab?.();
   disposeActiveCollab = undefined;
   activeCollabShell = undefined;
+  closeWorkspacePanelForBodySwap();
   document.body.className = snapshot.bodyClass;
   document.body.replaceChildren(...snapshot.children);
+  attachWorkspacePanel();
   document.title = snapshot.title;
   dashboardSnapshot = undefined;
   history.replaceState({ ompDirectory: historyState }, "", "/");
@@ -2262,6 +2397,7 @@ function enterCollabClient(
   requestId?: string,
 ): void {
   setStatus("ready", "");
+  closeWorkspacePanelForBodySwap();
   if (dashboardSnapshot === undefined) {
     const historyState: DirectoryHistoryState = {
       scrollY: window.scrollY,
@@ -2319,6 +2455,8 @@ function enterCollabClient(
   const shellActions = document.createElement("span");
   shellActions.className = "shell-actions";
   shellActions.append(tools, control, connection);
+  const workspaceLauncher = workspacePanel?.createLauncher();
+  if (workspaceLauncher !== undefined) shellActions.append(workspaceLauncher);
   bar.append(back, heading, shellActions);
 
   const container = document.createElement("div");
@@ -2388,7 +2526,9 @@ function enterCollabClient(
     history.pushState({ ompCollab: true }, "", "/client/");
   }
   document.body.className = "collab-shell-active";
+  closeWorkspacePanelForBodySwap();
   document.body.replaceChildren(shell);
+  attachWorkspacePanel();
   document.title = `${sessionTitle(session)} · OMP Sessions`;
 
   const shellState: ActiveCollabShell = {
@@ -2400,6 +2540,10 @@ function enterCollabClient(
     triageBar,
     shell,
     switcher,
+    revokeTransport: () => {
+      disposeClient();
+      disposeClient = (): void => undefined;
+    },
     answerShown: false,
     answerTriageVisible: false,
     hasBeenLive: false,
@@ -2426,6 +2570,7 @@ function enterCollabClient(
     removeLifecycleListeners();
     disposeClient();
     disposeClient = (): void => undefined;
+    if (workspaceLauncher !== undefined) workspacePanel?.releaseLauncher(workspaceLauncher);
     if (activeCollabShell === shellState) activeCollabShell = undefined;
     if (disposeActiveCollab === dispose) disposeActiveCollab = undefined;
   };
@@ -2460,6 +2605,7 @@ function enterCollabClient(
         headerSlot: tools,
         quickReplies: readQuickReplies(quickReplyStorage()),
         onStateChange: updateConnection,
+        onAuthorizationDenied: () => enterAuthorizationDenied("Your access was refused. Sign in again to continue."),
       },
     );
     disposeActiveCollab = dispose;
@@ -2478,6 +2624,7 @@ async function launch(
   button?: HTMLButtonElement,
   requestId?: string,
 ): Promise<boolean> {
+  if (authorizationDenied) return false;
   const sourceShell = activeCollabShell;
   selectionSequence += 1;
   const selection = selectionSequence;
@@ -2634,6 +2781,7 @@ function applyEvent(event: SessionEvent, epoch: number): boolean {
     // A fleet snapshot replaces sessions and machines together, including one sent mid-stream
     // because only a machine's reachability changed.
     hosts = event.hosts;
+    workspacePanel?.hostsChanged();
     fleetStatus = event.fleetStatus;
     replaceSessionSnapshot(event.sessions);
   } else if (event.type === "session_upsert") {
@@ -2692,6 +2840,7 @@ async function loadSnapshot(epoch: number): Promise<boolean> {
     directoryLoaded = true;
     lastFreshAt = Date.now();
     hosts = payload.hosts;
+    workspacePanel?.hostsChanged();
     fleetStatus = payload.fleetStatus;
     replaceSessionSnapshot(payload.sessions);
     render();
@@ -2912,6 +3061,35 @@ document.addEventListener("visibilitychange", () => {
   }
   if (authorizationDenied || directoryStreamIsLive()) return;
   void refreshAndConnect();
+});
+
+workspacePanel = createWorkspacePanel({
+  hosts: () => hosts?.map(machine => machine.host) ?? [],
+  onRefresh: () => { void refreshAndConnect(); },
+  onAuthorizationLost: () => enterAuthorizationDenied("Your access was refused. Sign in again to continue."),
+  request: async (body, signal) => {
+    if (authorizationDenied) return Response.json({ ok: false, error: "unauthorized" }, { status: 401 });
+    const response = await fetch("/api/v1/workspace", {
+      method: "POST",
+      headers: { ...API_REQUEST_HEADERS, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      credentials: "same-origin",
+      redirect: "manual",
+      cache: "no-store",
+      ...(signal === undefined ? {} : { signal }),
+    });
+    if (isSignInRequired(response)) enterAuthorizationDenied(signInCopy(response));
+    return response;
+  },
+});
+requiredElement<HTMLElement>(".brand-row").insertBefore(workspacePanel.launcher, settingsButton);
+document.body.append(workspacePanel.dialog);
+let workspaceWritesUnsettled = workspacePanel.hasUnsettledWrites();
+workspacePanel.controller.subscribe(() => {
+  const unsettled = workspacePanel?.hasUnsettledWrites() === true;
+  const becameSettled = workspaceWritesUnsettled && !unsettled;
+  workspaceWritesUnsettled = unsettled;
+  if (becameSettled) applyActivatedWorkerUpdate();
 });
 
 const applicationWorkerRegistration = initializeApplicationWorker();

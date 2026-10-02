@@ -5,6 +5,7 @@ import {
   notificationRoutePath,
   type AttentionPushMessage,
 } from "@omp-session-gateway/protocol";
+import { syncAppBadge } from "./app-badge.ts";
 
 declare const __SHELL_ASSETS__: readonly string[];
 declare const __CACHE_NAME__: string;
@@ -33,19 +34,6 @@ worker.addEventListener("message", event => {
     version: PUSH_API_VERSION,
   });
 });
-
-
-async function updateAppBadge(pendingAskCount: number): Promise<void> {
-  const badgeNavigator = worker.navigator as Navigator & {
-    clearAppBadge?: () => Promise<void>;
-    setAppBadge?: (contents?: number) => Promise<void>;
-  };
-  if (pendingAskCount === 0) {
-    await badgeNavigator.clearAppBadge?.();
-  } else {
-    await badgeNavigator.setAppBadge?.(pendingAskCount);
-  }
-}
 
 // Serialize notification read/replace and badge updates across overlapping push events.
 let pushTail: Promise<void> = Promise.resolve();
@@ -90,7 +78,7 @@ worker.addEventListener("push", event => {
         matchesRequest(notification, message.instanceId, message.requestId) &&
         notification.title === message.title && notification.body === (message.body ?? ""),
       )) {
-        await updateAppBadge(message.pendingAskCount);
+        await syncAppBadge(message.pendingAskCount);
         return;
       }
       if (message.type === "activity_stop") {
@@ -98,7 +86,7 @@ worker.addEventListener("push", event => {
           const intent = parseNotificationData(notification.data);
           return intent?.kind === "attention" && intent.instanceId === message.instanceId;
         })) {
-          await updateAppBadge(message.pendingAskCount);
+          await syncAppBadge(message.pendingAskCount);
           return;
         }
       }
@@ -121,7 +109,7 @@ worker.addEventListener("push", event => {
       await worker.registration.showNotification(message.title, options);
       shownAtByTag.set(tag, performance.now());
     }
-    await updateAppBadge(message.pendingAskCount);
+    await syncAppBadge(message.pendingAskCount);
   });
   // Preserve this event's failure without poisoning later deliveries.
   pushTail = delivery.catch(() => {});

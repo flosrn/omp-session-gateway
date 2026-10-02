@@ -17,6 +17,7 @@ import type { FederationConfig } from "./config.ts";
 import type { LaunchBroker } from "./http.ts";
 import type { LaunchResolution } from "./omp-registry.ts";
 import type { SessionRegistry } from "./registry.ts";
+import { isWriteOperation, type WorkspaceRequest } from "./workspace.ts";
 
 /** Room for every machine at the hub's 200-session cap, with headroom; anything larger is refused. */
 export const MAX_FLEET_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -170,8 +171,16 @@ export class FleetBridgeClient {
     return outcome;
   }
 
+  async workspace(request: WorkspaceRequest): Promise<{ status: number; body: unknown }> {
+    return this.#request("/gateway/workspace", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    }, isWriteOperation(request.operation) ? 35_000 : 20_000);
+  }
+
   async #request(
-    path: "/gateway/sessions" | "/gateway/open",
+    path: "/gateway/sessions" | "/gateway/open" | "/gateway/workspace",
     init: { method: "GET" | "POST"; headers?: Record<string, string>; body?: string },
     timeoutMs: number,
   ): Promise<{ status: number; body: unknown }> {

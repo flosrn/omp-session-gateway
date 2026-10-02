@@ -6,15 +6,31 @@ subdirectory.
 ## Product boundary
 
 OMP Session Gateway is a secure, local-first directory and capability broker for the browser
-collaboration pages of currently running interactive Oh My Pi (OMP) processes.
+collaboration pages of currently running interactive Oh My Pi (OMP) processes. Two paths share the
+code; know which one you are changing.
+
+**Upstream generic path** (standalone discovery, `tailscale-serve`):
 
 - Reuse OMP's existing `packages/collab-web` client and wire protocol.
 - The PWA lists sessions and launches that client; it does not render or mutate transcripts.
 - Consume mainline OMP’s discovery/query contract; keep gateway changes independent of OMP internals.
 - Do not add terminal injection, terminal or PTY scraping, QR decoding, clipboard monitoring,
   process-memory inspection, or saved-session-file scraping.
-- Do not claim affiliation with or endorsement by OMP, and do not reuse OMP artwork without
-  permission.
+
+**Private flosrn fleet path** (`cloudflare-access` + `federation`, ADR-033, ADR-034): Flo
+authorized a wider boundary for this fork only. The Gateway may additionally show HarnessOS
+activity/workspace annotations and relay the workspace RPC (`POST /api/v1/workspace`): Orca
+inventory, search, history, read-only saved transcripts, and send/create/resume/set/sleep/close.
+
+- The Gateway itself still reads no session file, scrapes no terminal, and injects no input. It
+  only relays a strictly validated request to the HarnessOS bridge socket.
+- HarnessOS executes each operation through official Orca CLI commands or its narrow runtime RPCs
+  (fixed argv, never a shell built from client text) on an inventory-allowlisted host.
+- Keep this path out of the standalone build's behavior: without `federation` the route answers
+  `503 unavailable` and no annotation appears.
+
+Both paths: do not claim affiliation with or endorsement by OMP, and do not reuse OMP artwork
+without permission.
 
 ## Sources of truth
 
@@ -75,10 +91,15 @@ URLs, redirect locations, cookies, browser storage, service-worker caches, analy
 assets, screenshots, recordings, issue fixtures, or CI artifacts. JavaScript strings cannot be
 reliably zeroized; minimize their lifetime and references instead of claiming zeroization.
 
-Session-list and SSE responses contain metadata only. Fetch a capability only after an explicit View
-or Control action. Launch requests include the expected generation; stale cards fail rather than
-receiving a newer capability. Transfer capabilities to the same-origin pinned client in memory. The gateway fetches each
-capability from OMP at launch time and never stores or caches it, even in the registry.
+Session-list and SSE responses carry no capability. On the private path they also carry
+activity/workspace annotations (last-entry preview, intent, workspace path) — signed-in owner
+metadata, never a capability, and never rendered as a path or identity. Fetch a capability only
+after an explicit View or Control action. Launch requests include the expected generation; stale
+cards fail rather than receiving a newer capability. Transfer capabilities to the same-origin
+pinned client in memory. The gateway fetches each capability from OMP at launch time and never
+stores or caches it, even in the registry. Workspace replies, including saved transcripts, live
+only in page memory. Browser storage holds only cosmetic preferences, device-local triage records,
+and the metadata-only resume selection — never a capability, bearer, or transcript.
 Gateway log fields are numeric or boolean only; never log strings from host queries or metadata.
 
 ### HTTP and browser
@@ -128,6 +149,13 @@ The supported settings contract is:
 - Bound host entries, records, query and body sizes, SSE queues, titles, and paths.
 - Keep the current OMP relay for the supported path. A self-hosted or proxied relay remains
   unsupported until separately threat-modeled and soak-qualified.
+- Annotations: a value the host did not observe stays `null` or absent, never an invented zero.
+  Orca workspace state never stands in for OMP `busy`/`inputRequired`.
+- Workspace writes run at most once per `requestId`: never retry one automatically, and report a
+  lost or unreadable reply as `outcome-unknown`, never success. Only the user resends, with the
+  identical body and id.
+- The private bridge listing and the Gateway parser change together: an older Gateway refuses a
+  listing that carries annotations. Deploy and roll back the Gateway pin with its HarnessOS pin.
 
 ## Change and release discipline
 
@@ -138,7 +166,9 @@ The supported settings contract is:
 - Use the Tested / Supported / Qualified vocabulary in `docs/COMPATIBILITY.md` (ADR-030). Claim
   support only for platform families whose named CI lanes are green, and qualification only for the
   exact combinations marked qualified in `docs/RELEASE_STATUS.md` and `docs/COMPATIBILITY.md`. Never
-  present hosted-runner, emulated-device, or smoke evidence as qualification.
+  present hosted-runner, emulated-device, or smoke evidence as qualification. Upstream
+  qualification never transfers to the private fleet path; its evidence stays **Tested** until a
+  qualification of its own is recorded.
 - Update architecture, protocol, operations, compatibility, security, and changelog material when
   their contracts change. Record accepted architecture changes in `docs/DECISIONS.md`.
 - Keep generated assets and unrelated refactors out of integration changes.

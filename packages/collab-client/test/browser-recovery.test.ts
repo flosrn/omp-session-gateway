@@ -56,7 +56,9 @@ interface RecoveryHarness {
   readonly window: FakeRecoveryWindow;
 }
 
-function recoveryHarness(results: readonly (boolean | "hang" | "deferred-abort")[]): RecoveryHarness {
+type ProbeResult = boolean | number | "hang" | "deferred-abort" | "network" | "opaqueredirect";
+
+function recoveryHarness(results: readonly ProbeResult[]): RecoveryHarness {
   const connection = new EventTarget();
   const document = new FakeRecoveryDocument();
   const window = new FakeRecoveryWindow();
@@ -85,7 +87,13 @@ function recoveryHarness(results: readonly (boolean | "hang" | "deferred-abort")
           else init?.signal?.addEventListener("abort", handleAbort, { once: true });
         });
       }
-      return new Response(null, { status: result === false ? 503 : 200 });
+      if (result === "network") throw new TypeError("Failed to fetch");
+      if (result === "opaqueredirect") {
+        // Response.type is read-only on a constructed Response; only the probe's read fields matter.
+        const opaque = { status: 0, ok: false, type: "opaqueredirect" } as Response;
+        return opaque;
+      }
+      return new Response(null, { status: typeof result === "number" ? result : result === false ? 503 : 200 });
     },
   };
   return { connection, deferredAborts, document, environment, fetches, health, refreshed, relayMeasurements, window };
@@ -354,6 +362,89 @@ describe("collaboration browser network recovery", () => {
     await settle();
     expect(harness.health.at(-1)?.state).toBe("healthy");
 
+    dispose();
+  });
+
+  test("probes through the edge with manual redirects and the AJAX marker", async () => {
+    const harness = recoveryHarness([true]);
+    const dispose = installBrowserConnectionRecovery(() => {}, harness.environment);
+    harness.window.runNextTimer();
+    await settle();
+    const init = harness.fetches[0]?.init;
+    expect(init?.redirect).toBe("manual");
+    expect(new Headers(init?.headers).get("X-Requested-With")).toBe("XMLHttpRequest");
+    expect(init?.credentials).toBe("same-origin");
+    dispose();
+  });
+
+  test.each([401, 403, "opaqueredirect"] as const)("treats a %s probe as a terminal refusal", async refusal => {
+    const harness = recoveryHarness([true, refusal, true, true]);
+    const denials: number[] = [];
+    const relayPauses: boolean[] = [];
+    const dispose = installBrowserConnectionRecovery(
+      () => {
+        harness.refreshed.count += 1;
+      },
+      harness.environment,
+      state => harness.health.push(state),
+      () => {
+        harness.relayMeasurements.count += 1;
+      },
+      paused => relayPauses.push(paused),
+      () => denials.push(harness.fetches.length),
+    );
+    harness.window.runNextTimer();
+    await settle();
+    expect(harness.health.at(-1)?.state).toBe("healthy");
+
+    harness.window.runNextTimer();
+    await settle();
+    expect(denials).toEqual([2]);
+    expect(relayPauses.at(-1)).toBe(true);
+    // A refusal is not an outage: no retry is scheduled, published, or refreshed into.
+    expect(harness.health.at(-1)?.state).toBe("healthy");
+    expect(harness.window.timers.size).toBe(0);
+
+    for (const type of ["online", "pageshow"]) harness.window.dispatchEvent(new Event(type));
+    harness.connection.dispatchEvent(new Event("change"));
+    harness.document.dispatchEvent(new Event("visibilitychange"));
+    await settle();
+    expect(harness.fetches).toHaveLength(2);
+    expect(harness.refreshed.count).toBe(0);
+    expect(harness.relayMeasurements.count).toBe(0);
+    expect(denials).toEqual([2]);
+    dispose();
+  });
+
+  test.each([503, 502, 404, "network", "hang"] as const)("keeps %s on the transient retry path", async failure => {
+    const harness = recoveryHarness([failure, true, true]);
+    const denials: string[] = [];
+    const dispose = installBrowserConnectionRecovery(
+      () => {
+        harness.refreshed.count += 1;
+      },
+      harness.environment,
+      state => harness.health.push(state),
+      undefined,
+      undefined,
+      () => denials.push("denied"),
+    );
+    harness.window.runNextTimer();
+    await settle();
+    if (failure === "hang") {
+      harness.window.runNextTimer();
+      await settle();
+    }
+    expect(harness.health.at(-1)?.state).toBe("degraded");
+
+    harness.window.runNextTimer();
+    await settle();
+    expect(harness.health.at(-1)?.state).toBe("checking");
+    expect(harness.refreshed.count).toBe(1);
+    harness.window.runNextTimer();
+    await settle();
+    expect(harness.health.at(-1)?.state).toBe("healthy");
+    expect(denials).toEqual([]);
     dispose();
   });
 });

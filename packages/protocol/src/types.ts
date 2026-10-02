@@ -25,6 +25,54 @@ export const FLEET_NATIVE_INSTANCE_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/u;
 export const MAX_FLEET_HOSTS = 64;
 export const MAX_FLEET_HOST_ERROR_CODEPOINTS = 512;
 
+/** Activity and workspace text bounds, in UTF-16 code units as the HarnessOS hub schema counts them. */
+export const MAX_ACTIVITY_TOOL_LENGTH = 64;
+export const MAX_ACTIVITY_INTENT_LENGTH = 160;
+export const MAX_ACTIVITY_PREVIEW_LENGTH = 240;
+export const MAX_WORKSPACE_ID_LENGTH = 1_024;
+export const MAX_WORKSPACE_PATH_LENGTH = 512;
+export const MAX_WORKSPACE_PROJECT_LENGTH = 128;
+export const MAX_WORKSPACE_BRANCH_LENGTH = 256;
+export const MAX_WORKSPACE_COMMENT_LENGTH = 512;
+export const MAX_WORKSPACE_STATUS_LENGTH = 64;
+export const MAX_WORKSPACE_PR_LENGTH = 1_024;
+/** ECMAScript TimeClip: every accepted epoch-millisecond instant survives `new Date()`. */
+export const MAX_EPOCH_MS = 8_640_000_000_000_000;
+
+/**
+ * What one session last did, as the host observed it. Every field is `null` when not observed:
+ * a missing count is never reported as zero. `contextTokens` is input plus cache read and write of
+ * the latest assistant request; `cost` is the persisted usage total for the whole session, not a
+ * repricing; `contextWindow` and `subagents` are present only where the host can observe them.
+ */
+export interface SessionActivity {
+  /** Last entry written, epoch milliseconds. */
+  readonly at: number | null;
+  readonly tool: string | null;
+  readonly intent: string | null;
+  readonly preview: string | null;
+  readonly contextTokens: number | null;
+  readonly contextWindow: number | null;
+  readonly cost: number | null;
+  readonly subagents: number | null;
+}
+
+/**
+ * The Orca workspace a session runs in, attached only on an exact cwd or terminal identity match.
+ * Orca state never stands in for OMP activity: `busy`/`inputRequired` remain authoritative.
+ * `id` and `path` identify the workspace for actions and are never rendered.
+ */
+export interface SessionWorkspace {
+  readonly id: string;
+  readonly path: string;
+  readonly project: string;
+  readonly branch: string | null;
+  readonly comment: string | null;
+  readonly status: string | null;
+  readonly unread: boolean;
+  readonly pr: string | null;
+}
+
 /**
  * Freshness of one fleet machine's reading, on the HarnessOS hub's clock: `live` is current,
  * `stale` is the last good reading kept for display, `never` has had no reading since the hub
@@ -70,6 +118,10 @@ export interface FleetBridgeSession {
   readonly tmuxSession: string | null;
   /** Omitted by a hub that predates access reporting: unknown, so never controllable. */
   readonly canControl?: boolean;
+  /** Omitted by a hub that predates activity reporting: unknown, never idle or zero. */
+  readonly activity?: SessionActivity;
+  /** Omitted when no Orca workspace matches this session exactly. */
+  readonly workspace?: SessionWorkspace;
 }
 
 export interface FleetBridgeHost {
@@ -180,6 +232,9 @@ export interface ObservedSessionInput {
   readonly originalInstanceId?: string;
   readonly hostStatus?: FleetHostStatus;
   readonly available?: boolean;
+  /** Last known even while the machine is stale; `busy` alone says whether it is current. */
+  readonly activity?: SessionActivity;
+  readonly workspace?: SessionWorkspace;
 }
 
 export interface SessionAskMetadata {
@@ -208,6 +263,8 @@ export interface SessionMetadata {
   readonly originalInstanceId?: string;
   readonly hostStatus?: FleetHostStatus;
   readonly available?: boolean;
+  readonly activity?: SessionActivity;
+  readonly workspace?: SessionWorkspace;
 }
 
 export interface SessionListResponse {

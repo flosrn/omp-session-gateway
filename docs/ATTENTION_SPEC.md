@@ -128,9 +128,11 @@ means a turn is running; false means no turn is currently running. Missing/null 
 not idle. The value may be false during a scheduling pause; it never proves successful completion
 or process exit. Older hosts remain visible but cannot produce activity-stop alerts.
 
-The registry recognizes only a known `true → false` sample for the same continuing generation
-and immutable host/session identity, with neither the previous nor current sample waiting for
-input. Ask start or resolution wins when it overlaps the sampled stop. Initial idle, repeated
+The registry raises a stop only when a turn it observed working (`busy: true`, no ask) on the same
+continuing generation and immutable host/session identity is next sampled idle (`busy: false`, no
+ask). The working latch survives a mid-turn ask, which hides `busy`, so answer-then-idle still
+stops; the current sample itself is never waiting. Ask start or resolution wins when it overlaps the
+sampled stop. Initial idle, repeated
 idle, unknown activity, generation/identity replacement, disappearance, endpoint death, TTL expiry,
 and daemon restart never synthesize a stop. Retained/unreadable polls clear only activity knowledge,
 without refreshing receipt time, last-seen time, ask state, or TTL; recovery at false cannot alert.
@@ -195,7 +197,8 @@ and returns the collaboration capability through the ordinary no-store, in-memor
 
 For a stop, the route is `/collab/{instanceId}?activity=stopped&generation={generation}`.
 The app scrubs it before networking, fetches authenticated metadata, and opens **View** only for
-the same generation when View remains available. It never upgrades the tap to Control. A gone,
+the same generation when View remains available. It never upgrades a View-capable tap to Control;
+a private-fleet card offers no View, so its tap opens Control for that same generation. A gone,
 replaced, or unavailable session leaves the directory visible with an expired/changed notice.
 Activity may have resumed after delivery; the tap opens the current transcript, not a claimed
 completed result. The ordinary launch endpoint revalidates generation and access again.

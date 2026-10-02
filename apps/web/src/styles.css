@@ -486,6 +486,18 @@ h1 {
 
 /* ——— Waiting / working rows ——————————————————————————————————— */
 
+.queue-row-frame,
+.queue-copy,
+.held-copy {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.held-row > .activity-pr {
+  grid-column: 1 / -1;
+}
+
 .queue-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto auto;

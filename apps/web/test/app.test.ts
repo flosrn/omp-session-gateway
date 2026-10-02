@@ -5,6 +5,10 @@ import type { CollabEmbedOptions, CollabEmbedState } from "../../../packages/col
 
 let embedStateSink: ((state: CollabEmbedState) => void) | undefined;
 let lastEmbedOptions: CollabEmbedOptions | undefined;
+/** How many embedded clients the app has torn down; a stopped client has closed its transport. */
+let embedDisposals = 0;
+/** How many embedded clients the app has started, i.e. handed a capability to. */
+let embedStarts = 0;
 /** Test seam imported by app.ts only when a launch fixture sets the collab module URL. */
 export function startCollabWithCapability(
   _container: HTMLElement,
@@ -14,8 +18,10 @@ export function startCollabWithCapability(
 ): () => void {
   embedStateSink = options?.onStateChange;
   lastEmbedOptions = options;
+  embedStarts += 1;
   return () => {
     embedStateSink = undefined;
+    embedDisposals += 1;
   };
 }
 
@@ -77,6 +83,8 @@ class FakeElement extends EventTarget {
   readonly attributes = new Map<string, string>();
   readonly children: FakeElement[] = [];
   readonly dataset: Record<string, string> = {};
+  readonly style: Record<string, string> = {};
+  parentElement: FakeElement | null = null;
   checked = false;
   className = "";
   disabled = false;
@@ -96,14 +104,44 @@ class FakeElement extends EventTarget {
   }
 
   append(...children: FakeElement[]): void {
+    for (const child of children) this.#adopt(child);
     this.children.push(...children);
   }
 
-  replaceChildren(...children: FakeElement[]): void {
-    this.children.splice(0, this.children.length, ...children);
+  insertBefore(child: FakeElement, reference: FakeElement | null): FakeElement {
+    if (reference === null) {
+      this.append(child);
+      return child;
+    }
+    if (reference.parentElement !== this) throw new DOMException("reference is not a child", "NotFoundError");
+    this.#adopt(child);
+    this.children.splice(this.children.indexOf(reference), 0, child);
+    return child;
   }
+
+  after(...siblings: FakeElement[]): void {
+    const parent = this.parentElement;
+    if (parent === null) return;
+    for (const sibling of siblings) parent.#adopt(sibling);
+    parent.children.splice(parent.children.indexOf(this) + 1, 0, ...siblings);
+  }
+
+  replaceChildren(...children: FakeElement[]): void {
+    for (const child of this.children.splice(0)) child.parentElement = null;
+    this.append(...children);
+  }
+
   remove(): void {
-    this.children.splice(0, this.children.length);
+    const parent = this.parentElement;
+    if (parent === null) return;
+    parent.children.splice(parent.children.indexOf(this), 1);
+    this.parentElement = null;
+  }
+
+  /** Moves `child` here, detaching it from any previous parent as the DOM does. */
+  #adopt(child: FakeElement): void {
+    child.remove();
+    child.parentElement = this;
   }
 
   setAttribute(name: string, value: string): void {
@@ -132,20 +170,24 @@ class FakeElement extends EventTarget {
     this.open = false;
   }
 
+  matches(selector: string): boolean {
+    return selector.split(",").some(part => {
+      const single = part.trim();
+      if (single === "link[data-omp-collab-styles]") return this.dataset.ompCollabStyles === "true";
+      if (single.startsWith(".")) return this.className.split(/\s+/u).includes(single.slice(1));
+      if (single.startsWith("#")) return this.id === single.slice(1);
+      return this.tagName.toLowerCase() === single.toLowerCase();
+    });
+  }
+
   querySelector(selector: string): FakeElement | null {
     return this.querySelectorAll(selector)[0] ?? null;
   }
 
   querySelectorAll(selector: string): FakeElement[] {
-    const matches = (element: FakeElement): boolean => {
-      if (selector === "link[data-omp-collab-styles]") return element.dataset.ompCollabStyles === "true";
-      if (selector.startsWith(".")) return element.className.split(/\s+/u).includes(selector.slice(1));
-      if (selector.startsWith("#")) return element.id === selector.slice(1);
-      return element.tagName.toLowerCase() === selector.toLowerCase();
-    };
     const found: FakeElement[] = [];
     const visit = (element: FakeElement): void => {
-      if (matches(element)) found.push(element);
+      if (element.matches(selector)) found.push(element);
       for (const child of element.children) visit(child);
     };
     for (const child of this.children) visit(child);
@@ -238,9 +280,11 @@ class FakeDocument extends EventTarget {
   constructor(
     readonly bySelector: Record<string, FakeElement>,
     readonly detailInputs: readonly FakeElement[],
+    readonly defaultView: FakeWindow,
   ) {
     super();
-    this.body.append(...Object.values(bySelector));
+    // Elements already nested in the shell (the settings button inside `.brand-row`) stay put.
+    this.body.append(...Object.values(bySelector).filter(element => element.parentElement === null));
   }
 
   querySelector(selector: string): FakeElement | null {
@@ -252,6 +296,10 @@ class FakeDocument extends EventTarget {
   }
 
   createElement(tagName: string): FakeElement {
+    return new FakeElement(tagName);
+  }
+
+  createElementNS(_namespace: string, tagName: string): FakeElement {
     return new FakeElement(tagName);
   }
 
@@ -359,6 +407,8 @@ interface BrowserHarness {
     fleetStatus?: "ok" | "unreachable",
   ): void;
   holdNextLaunch(): Promise<void>;
+  /** Holds every launch response until the returned release is called. */
+  holdLaunches(): () => void;
 }
 
 function session(
@@ -410,6 +460,8 @@ async function bootApp(options: {
   readonly initialHosts?: readonly FleetHostSummary[];
   readonly initialFleetStatus?: "ok" | "unreachable";
   readonly launchStatus?: number;
+  /** Status `/api/v1/workspace` answers; only an Access refusal is modelled. */
+  readonly workspaceStatus?: 401 | 403;
   readonly suffix: string;
 }): Promise<BrowserHarness> {
   FakeEventSource.instances.length = 0;
@@ -445,6 +497,10 @@ async function bootApp(options: {
   directoryCount.hidden = true;
   const quickRepliesInput = new FakeElement("textarea");
   const quickRepliesReset = new FakeElement("button");
+  // The masthead row the Workspace launcher joins, right before Settings.
+  const brandRow = new FakeElement("div");
+  brandRow.className = "brand-row";
+  brandRow.append(new FakeElement("p"), settingsButton);
   const bySelector: Record<string, FakeElement> = {
     "#session-list": sessionList,
     "#empty-state": emptyState,
@@ -465,9 +521,10 @@ async function bootApp(options: {
     "#quick-replies-input": quickRepliesInput,
     "#quick-replies-reset": quickRepliesReset,
     "link[data-omp-collab-styles]": new FakeElement("link"),
+    ".brand-row": brandRow,
   };
-  const document = new FakeDocument(bySelector, notificationDetailInputs);
   const window = new FakeWindow();
+  const document = new FakeDocument(bySelector, notificationDetailInputs, window);
   const localStorage = options.storage ?? new FakeStorage();
   const reloads = { count: 0 };
   const location = {
@@ -624,6 +681,9 @@ async function bootApp(options: {
         capability: "capability-canary",
       });
     }
+    if (path === "/api/v1/workspace" && options.workspaceStatus !== undefined) {
+      return new Response("", { status: options.workspaceStatus });
+    }
     if (path !== "/api/v1/sessions") throw new Error(`unexpected fetch: ${path}`);
     if (failedListRequests > 0) {
       failedListRequests -= 1;
@@ -772,6 +832,16 @@ async function bootApp(options: {
         };
       });
       return Promise.resolve().then(release);
+    },
+    holdLaunches(): () => void {
+      let release: () => void = () => undefined;
+      heldLaunch = new Promise<void>(resolve => {
+        release = () => {
+          heldLaunch = undefined;
+          resolve();
+        };
+      });
+      return release;
     },
     setList(revision, sessions, status = 200, hosts = listHosts, fleetStatus = listFleetStatus): void {
       listRevision = revision;
@@ -1805,6 +1875,11 @@ async function drainMicrotasks(): Promise<void> {
   for (let index = 0; index < 50; index += 1) await Promise.resolve();
 }
 
+/** Every button on the page that opens the Workspaces panel: the masthead's and any shell's. */
+function workspaceLaunchers(harness: BrowserHarness): FakeElement[] {
+  return harness.body.querySelectorAll("button").filter(button => button.getAttribute("aria-label") === "Workspaces");
+}
+
 describe("fleet directory, sign-in, and remembered selection", () => {
   test("labels machines, keeps unreachable rows visible but inert, and lists empty and never-reached machines", async () => {
     const live = fleetSession("a", "mac-studio", "live", { title: "Live build" });
@@ -1936,6 +2011,29 @@ describe("fleet directory, sign-in, and remembered selection", () => {
       signIn?.dispatchEvent(new Event("click"));
       expect(harness.reloads.count).toBe(1);
     }
+  });
+
+  test("a refused workspace request revokes the directory and every Workspaces launcher", async () => {
+    const harness = await bootApp({
+      permission: "denied",
+      suffix: "workspace-refused",
+      initialSessions: [],
+      initialHosts: [{ host: "mac-studio", status: "live", ageSeconds: 0 }],
+      workspaceStatus: 401,
+    });
+    const [launcher] = workspaceLaunchers(harness);
+    expect(launcher?.disabled).toBeFalse();
+    launcher?.dispatchEvent(new Event("click"));
+    await settleUntil(() => harness.elements.statusBanner.dataset.kind === "unauthorized", 100);
+
+    expect(harness.elements.statusBanner.querySelector(".status-action")?.textContent).toBe("Sign in again");
+    expect(workspaceLaunchers(harness).every(button => button.disabled)).toBeTrue();
+    const workspaceReads = (): number => harness.fetchPaths.filter(path => path === "/api/v1/workspace").length;
+    const readsAtDenial = workspaceReads();
+    launcher?.dispatchEvent(new Event("click"));
+    harness.runTimers();
+    await drainMicrotasks();
+    expect(workspaceReads()).toBe(readsAtDenial);
   });
 
   test("a reload never reopens a remembered session that ended, restarted, became unreachable, or lost Control", async () => {
@@ -2154,6 +2252,7 @@ describe("fleet directory, sign-in, and remembered selection", () => {
       launchStatus: 200,
     });
     await openControl(harness, current);
+    const disposalsBeforeDenial = embedDisposals;
     harness.setList(2, [], 401);
     harness.disconnectEvents();
     harness.runTimers();
@@ -2166,6 +2265,64 @@ describe("fleet directory, sign-in, and remembered selection", () => {
     expect(triage?.querySelector(".triage-action")?.textContent).toBe("Sign in again");
     expect(harness.elements.statusBanner.querySelector(".status-action")).toBeNull();
     expect(harness.body.className).toBe("collab-shell-active");
+    // The refusal also stops the embedded client's transport, and Workspaces with it.
+    expect(embedDisposals).toBe(disposalsBeforeDenial + 1);
+    expect(workspaceLaunchers(harness).length).toBeGreaterThan(0);
+    expect(workspaceLaunchers(harness).every(button => button.disabled)).toBeTrue();
+  });
+
+  test("a refusal reported by the embedded client stops its transport but keeps the shell", async () => {
+    const current = session("embed-auth-refusal-01");
+    const harness = await bootApp({
+      permission: "denied",
+      suffix: "embed-auth-refusal",
+      initialSessions: [current],
+      launchStatus: 200,
+    });
+    const triage = await openControl(harness, current);
+    const disposalsBeforeDenial = embedDisposals;
+    lastEmbedOptions?.onAuthorizationDenied?.();
+    await settleUntil(() => triage.dataset.kind === "signin", 100);
+
+    expect(embedDisposals).toBe(disposalsBeforeDenial + 1);
+    expect(harness.body.className).toBe("collab-shell-active");
+    expect(workspaceLaunchers(harness).every(button => button.disabled)).toBeTrue();
+    const sessionReads = harness.fetchPaths.filter(path => path === "/api/v1/sessions").length;
+    harness.runTimers();
+    await drainMicrotasks();
+    expect(harness.fetchPaths.filter(path => path === "/api/v1/sessions").length).toBe(sessionReads);
+    triage.querySelector(".triage-action")?.dispatchEvent(new Event("click"));
+    expect(harness.reloads.count).toBe(1);
+  });
+
+  test("an authorization refusal abandons a launch still waiting for its capability", async () => {
+    const current = session("pending-launch-deny-01");
+    const harness = await bootApp({
+      permission: "denied",
+      suffix: "pending-launch-deny",
+      initialSessions: [current],
+      launchStatus: 200,
+    });
+    const startsBefore = embedStarts;
+    const release = harness.holdLaunches();
+    harness.elements.sessionList.querySelector(".working-row")?.dispatchEvent(new Event("click"));
+    await settleUntil(() => harness.fetchPaths.some(path => path.endsWith("/launch")), 100);
+
+    harness.setList(2, [], 401);
+    harness.disconnectEvents();
+    harness.runTimers();
+    await settleUntil(
+      () =>
+        harness.elements.statusBanner.dataset.kind === "unauthorized" ||
+        harness.body.querySelector(".triage-bar")?.dataset.kind === "signin",
+      100,
+    );
+    release();
+    await drainMicrotasks();
+
+    // The capability that arrives after the refusal is never handed to a client.
+    expect(embedStarts).toBe(startsBefore);
+    expect(harness.fetchPaths.filter(path => path.endsWith("/launch"))).toHaveLength(1);
   });
 
   test("a sign-in action survives a buffered keepalive and the next connection tick", async () => {

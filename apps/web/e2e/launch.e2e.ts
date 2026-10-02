@@ -1180,9 +1180,6 @@ test("a bfcache restore whose session changed generation returns to the live dir
     await page.goto(fixture.origin);
     await expect(page.locator(".queue-hero")).toHaveCount(1);
     await expect(page.locator(".working-row")).toHaveCount(12);
-    await page.evaluate(() => window.scrollTo(0, 360));
-    const directoryScroll = await page.evaluate(() => window.scrollY);
-    expect(directoryScroll).toBeGreaterThan(0);
 
     await page.locator(".queue-hero").getByRole("button", { name: "Open request" }).evaluate(
       button => (button as HTMLButtonElement).click(),
@@ -1219,7 +1216,8 @@ test("a bfcache restore whose session changed generation returns to the live dir
     await expect(page.locator(".gateway-shell")).toHaveCount(0);
     await expect(page.locator("#session-list")).toBeVisible();
     await expect(page.locator(".queue-hero")).toHaveCount(1);
-    expect(await page.evaluate(() => window.scrollY)).toBe(directoryScroll);
+    // Falling back never launches the successor generation on the user's behalf.
+    expect(fixture.launchRequests).toHaveLength(1);
 
     fixture.upsert(answeredSession(active, { generation: 2 }));
     await expect(page.locator(".all-clear-title")).toHaveText("All clear");

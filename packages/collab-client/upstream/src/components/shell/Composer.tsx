@@ -21,12 +21,16 @@ export interface ComposerProps {
 
 /**
  * Quick replies exist only for a controlling guest with no pending ask: View is read-only, and an
- * ask is answered through its own controls. While the session is not live, or a photo prompt is
- * still awaiting its echo, the row stays in place but cannot send.
+ * ask is answered through its own controls. While the session is not live, a photo prompt is still
+ * awaiting its echo, or a quick reply is awaiting its own echo, the row stays in place but cannot send.
  */
-export function quickReplyState(snapshot: GuestSnapshot, photoSendPending: boolean): "hidden" | "disabled" | "ready" {
+export function quickReplyState(
+	snapshot: GuestSnapshot,
+	photoSendPending: boolean,
+	quickReplyPending = false,
+): "hidden" | "disabled" | "ready" {
 	if (snapshot.readOnly || snapshot.uiRequest !== null) return "hidden";
-	return snapshot.phase === "live" && !photoSendPending ? "ready" : "disabled";
+	return snapshot.phase === "live" && !photoSendPending && !quickReplyPending ? "ready" : "disabled";
 }
 
 /** Textarea metrics: line-height 20px + 8px vertical padding × 2 (kept in sync with shell.css). */
@@ -285,6 +289,7 @@ export function Composer({ client, snapshot, embedded = false, quickReplies = []
 	const [pendingPhotoPrompt, setPendingPhotoPrompt] = useState<PendingPhotoPrompt | null>(null);
 	const [photoConfirmationExpired, setPhotoConfirmationExpired] = useState(false);
 	const [photoSourceOpen, setPhotoSourceOpen] = useState(false);
+	const [pendingQuickReply, setPendingQuickReply] = useState<string | null>(null);
 	const taRef = useRef<HTMLTextAreaElement | null>(null);
 	const cameraInputRef = useRef<HTMLInputElement | null>(null);
 	const libraryInputRef = useRef<HTMLInputElement | null>(null);
@@ -301,7 +306,7 @@ export function Composer({ client, snapshot, embedded = false, quickReplies = []
 	const busy = snapshot.working;
 	const queued = snapshot.state?.queuedMessageCount ?? 0;
 	const relayReady = snapshot.relayHealth.state === "healthy";
-	const quickReplyRow = quickReplyState(snapshot, pendingPhotoPrompt !== null);
+	const quickReplyRow = quickReplyState(snapshot, pendingPhotoPrompt !== null, pendingQuickReply !== null);
 	const retryReady = pendingPhotoPrompt !== null && photoConfirmationExpired && relayReady;
 	const hasDraft = text.trim().length > 0 || photos.length > 0;
 	const canSend =
@@ -328,6 +333,22 @@ export function Composer({ client, snapshot, embedded = false, quickReplies = []
 		() => recommendedOptionIndex(snapshot),
 		[uiRequest, snapshot.entries, snapshot.stream, snapshot.activeTools],
 	);
+
+	useEffect(() => {
+		if (pendingQuickReply === null) return;
+		const echoed = snapshot.entries.some(entry => {
+			if (
+				entry.type !== "custom_message" ||
+				entry.customType !== COLLAB_PROMPT_MESSAGE_TYPE ||
+				typeof entry.content === "string"
+			) {
+				return false;
+			}
+			const text = entry.content[0];
+			return text?.type === "text" && text.text === pendingQuickReply;
+		});
+		if (echoed) setPendingQuickReply(null);
+	}, [pendingQuickReply, snapshot.entries]);
 
 	useLayoutEffect(() => {
 		autosize(taRef.current);
@@ -596,8 +617,9 @@ export function Composer({ client, snapshot, embedded = false, quickReplies = []
 							disabled={quickReplyRow !== "ready"}
 							title={`send “${reply}”`}
 							onClick={() => {
-								if (quickReplyRow !== "ready") return;
+								if (quickReplyRow !== "ready" || pendingQuickReply !== null) return;
 								setPhotoSourceOpen(false);
+								setPendingQuickReply(reply);
 								client.sendPrompt(reply);
 							}}
 						>

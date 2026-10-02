@@ -59,9 +59,9 @@ The registry is intentionally empty after daemon restart. The next host poll rep
 ### Private flosrn fleet variant
 
 With `federation` configured, the daemon replaces standalone OMP discovery with the HarnessOS
-fleet directory and Control broker. It polls a private gateway-only Unix socket with a separate
-bearer token, never the Hub's owner/admin socket. The bridge exposes only `/gateway/sessions`
-and `/gateway/open`; it does not grant Hub roles or administration.
+fleet directory and Control broker. It talks to a private gateway-only Unix socket with a separate
+bearer token, never the Hub's owner/admin socket. The bridge exposes only `GET /gateway/sessions`,
+`POST /gateway/open` and `POST /gateway/workspace`; it grants no Hub role or administration.
 
 The registry stays metadata-only and memory-only. A fleet card's `instanceId` is lowercase
 SHA-256 of `host + "\0" + originalInstanceId`, not a capability. Host summaries include empty,
@@ -75,6 +75,47 @@ still require the exact public origin. Standalone `tailscale-serve` retains its 
 The PWA remembers only a versioned instance/generation/mode selection for reload and foreground
 resume, then obtains a fresh capability through the normal broker. Push uses the same host-qualified
 metadata identity; unavailable cards produce neither attention nor activity-stop notifications.
+A fleet card has no View, so an activity-stop tap opens Control for the same generation.
+
+**Activity directory.** Each fleet card may carry HarnessOS `activity` (last entry time, tool,
+intent, one-line preview, context tokens/window, cumulative cost, subagent count) and an Orca
+`workspace` (branch, comment, status, unread, PR). HarnessOS reads them from the host's own
+session files and Orca, never the Gateway; field meanings are in
+[PROTOCOL.md](PROTOCOL.md#private-fleet-annotations). The registry treats a change in either as a
+revision. The directory lists working sessions Working first, then by `activity.at` (else
+`startedAt`), grouped by project or machine with collapsible groups. A missing fact is omitted,
+never drawn as zero; tool and intent show only while busy; a stale machine's facts read "Last
+known". Workspace `id`/`path` and session identities never reach visible text.
+
+**Workspace panel.** A panel beside the directory runs the workspace RPC on one authorized
+machine at a time: Orca workspaces and terminals (state, preview, send), search, past-session
+history with a read-only transcript and resume, create, and status/comment/sleep/close with
+confirmation. Every call is one `POST /api/v1/workspace`; the gateway validates, relays once to
+`/gateway/workspace`, and revalidates the reply. HarnessOS queues it for the Mac's operator agent,
+which runs it against Orca on the Mac or a paired compute host
+([request flow and dedupe](PROTOCOL.md#post-apiv1workspace)).
+
+```mermaid
+flowchart LR
+  PWA -- "POST /api/v1/workspace (Access JWT, exact Origin)" --> GW[omp-gatewayd]
+  GW -- "POST /gateway/workspace (bridge bearer)" --> Hub[HarnessOS hub broker]
+  Mac[Mac operator agent] -- "GET /operator/workspace/next (long-poll)" --> Hub
+  Mac -- "orca CLI argv / runtime RPC" --> Orca[(Orca: Mac or paired host)]
+  Mac -- "POST /operator/workspace/:id" --> Hub
+```
+
+**Badge and turn stop.** The open page sets the installed app badge to the pending-ask count it
+can Control, the same rule as Push `pendingAskCount`, and the service worker does the same from
+Push; both feature-detect the Badging API and clear it on authorization loss. The registry latches
+a turn observed working and carries it across a mid-turn ask, so answering and going idle still
+raises one activity stop. A stale or unknown reading, a generation change or a restart clears the
+latch rather than raising a stop.
+
+**Authorization loss.** A 401, 403 or Access login redirect on the directory snapshot, SSE,
+workspace RPC or the open client's same-origin health probe ends the page's authorization: the
+collaboration transport is disposed, the composer disabled, the workspace panel locked, the badge
+cleared. Only a fresh sign-in and an explicit launch reconnect. What this does and does not revoke
+is in [SECURITY.md](SECURITY.md#private-flosrn-access-and-fleet-boundary).
 
 
 ### 1.4 OMP Sessions PWA
@@ -135,13 +176,16 @@ the app synchronously scrubs before the same revalidation (ADR-017 amendment). V
 ordinary generation-bound, no-store, in-memory launch flow; stale taps never launch. Background
 delivery remains best effort and outside the v0.4.0 qualified core matrix.
 
-The registry alone detects known busy-to-idle edges on a continuing identity/generation. Retained
-polls remove only activity knowledge without extending TTL. Its private stop event shares the
-ordered dispatch queue but is never sent as a browser SSE event. A record-local revision marker
-invalidates stale queued delivery across busy, unknown, or identity transitions. Neither a previous
-nor current waiting sample may produce a stop. Stop taps use the exact instance/generation route
-and open View after fresh metadata; they never acquire Control. The shared per-instance
-notification tag and displayed-attention priority are specified in [ATTENTION_SPEC.md](ATTENTION_SPEC.md).
+The registry alone detects a turn ending on a continuing identity/generation: a turn observed
+working (`busy: true` outside an ask) latches, the latch survives a mid-turn ask (which hides
+`busy`), and the first later idle sample (`busy: false`, no ask) raises one stop. An unknown
+reading, a retained poll, a replacement or a restart clears the latch without a stop; a waiting
+sample never produces one itself. Retained polls remove only activity knowledge without extending
+TTL. Its private stop event shares the ordered dispatch queue but is never sent as a browser SSE
+event. A record-local revision marker invalidates stale queued delivery across busy, unknown, or
+identity transitions. Stop taps use the exact instance/generation route and open View after fresh
+metadata (Control on a View-less fleet card). The shared per-instance notification tag and
+displayed-attention priority are specified in [ATTENTION_SPEC.md](ATTENTION_SPEC.md).
 
 PWA upgrades activate immediately after the new content-hashed shell is cached. The shell includes
 the pinned collaboration-client module and stylesheet, and an idle directory warms the module
@@ -295,6 +339,11 @@ v0.4.0; it is not an additional Control gate operators can rely on today.
 ## 4. Why not process scanning or terminal automation?
 
 Process enumeration can find PIDs but cannot safely attach OMP's browser collaboration protocol to an existing interactive context or recover a capability without reading process memory. Simulated keystrokes, terminal scraping, QR decoding, and clipboard monitoring are fragile and create additional secret channels.
+
+The private fleet path's terminal `send` is not an exception in the Gateway: the Gateway relays a
+typed request, and HarnessOS delivers it through Orca's own `terminal send` command with a durable
+prompt id, after Orca reports the terminal connected and writable (ADR-034). Nothing scrapes a
+terminal or synthesizes keystrokes outside Orca's supported interface.
 
 Mainline OMP exposes the supported discovery/query surface needed here. Consume it rather than
 private deep imports, process inspection, or a second collaboration controller.
