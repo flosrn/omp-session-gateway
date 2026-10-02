@@ -220,6 +220,7 @@ interface ActiveCollabShell {
   readonly connectionChip: HTMLElement;
   readonly triageBar: HTMLElement;
   readonly shell: HTMLElement;
+  readonly switcher: HTMLDialogElement;
   answerShown: boolean;
   answerTriageVisible: boolean;
   triageTimeout?: number;
@@ -1420,6 +1421,85 @@ function createHeldRow(session: SessionMetadata): HTMLElement {
   return row;
 }
 
+/** Machine and working directory, plus why a row cannot be opened. */
+function switchRowDetail(session: SessionMetadata): string {
+  const values = [session.host, session.cwdLabel].filter(
+    (value): value is string => value !== undefined && value.length > 0,
+  );
+  if (!isAvailable(session)) values.push(unavailableCopy(session));
+  return values.join(" · ") || "Live OMP session";
+}
+
+function createSwitchRow(shell: ActiveCollabShell, session: SessionMetadata, dot: string): HTMLButtonElement {
+  const mode = primaryMode(session);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "switch-row";
+  button.dataset.instanceId = session.instanceId;
+  button.disabled = mode === undefined;
+  button.setAttribute(
+    "aria-label",
+    rowActionLabel(session, mode, session.inputRequired ? "Open request in" : "Control"),
+  );
+  const copy = document.createElement("span");
+  copy.className = "switch-copy";
+  copy.append(
+    createTextElement("span", "row-title", sessionTitle(session)),
+    createTextElement("span", "switch-detail", switchRowDetail(session)),
+  );
+  button.append(
+    createTextElement("span", isAvailable(session) ? `row-dot ${dot}` : "row-dot row-dot-unavailable", ""),
+    copy,
+    createTextElement("span", "row-chevron", "›"),
+  );
+  button.addEventListener("click", () => {
+    if (mode === undefined) return;
+    shell.switcher.close();
+    // Same launch as the directory row: a waiting question opens straight onto its request.
+    void launch(session, mode, undefined, mode === "control" && session.inputRequired ? session.ask?.requestId : undefined);
+  });
+  return button;
+}
+
+/** The directory's own order without leaving the session: needs-you first, then live work. */
+function renderSessionSwitcher(shell: ActiveCollabShell): void {
+  const others = (list: readonly SessionMetadata[]): SessionMetadata[] =>
+    list.filter(session => session.instanceId !== shell.instanceId);
+  const waiting = others(orderedWaitingSessions());
+  const held = others(orderedHeldSessions());
+  const working = others(orderedWorkingSessions());
+
+  const header = document.createElement("header");
+  const heading = document.createElement("div");
+  heading.append(
+    createTextElement("p", "sheet-kicker", "OMP Sessions"),
+    createTextElement("h2", "", "Switch session"),
+  );
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "sheet-close";
+  close.textContent = "Close";
+  close.setAttribute("aria-label", "Close session switcher");
+  close.addEventListener("click", () => shell.switcher.close());
+  header.append(heading, close);
+
+  const list = document.createElement("div");
+  list.className = "switch-list";
+  if (waiting.length + held.length > 0) {
+    list.append(createQueueKicker("Needs you"));
+    for (const session of waiting) list.append(createSwitchRow(shell, session, "row-dot-waiting"));
+    for (const session of held) list.append(createSwitchRow(shell, session, "row-dot-held"));
+  }
+  if (working.length > 0) {
+    list.append(createQueueKicker("Live sessions"));
+    for (const session of working) list.append(createSwitchRow(shell, session, "row-dot-live"));
+  }
+  if (list.childElementCount === 0) {
+    list.append(createTextElement("p", "switch-empty", "No other live sessions."));
+  }
+  shell.switcher.replaceChildren(createTextElement("div", "notification-sheet-handle", ""), header, list);
+}
+
 function appendDismissedControl(dismissed: readonly SessionMetadata[]): void {
   if (dismissed.length === 0) return;
   const control = document.createElement("aside");
@@ -2046,6 +2126,7 @@ async function holdCurrentAskAndAdvance(shell: ActiveCollabShell, current: Sessi
 
 function reconcileActiveCollabShell(): void {
   const shell = activeCollabShell;
+  if (shell?.switcher.open === true) renderSessionSwitcher(shell);
   if (
     shell === undefined ||
     shell.answerShown ||
@@ -2176,8 +2257,12 @@ function enterCollabClient(
   back.setAttribute("aria-label", "Back to Sessions");
   back.title = "Sessions";
   back.addEventListener("click", () => history.back());
-  const heading = document.createElement("span");
+  // The title doubles as the session switcher: one tap lists the other live sessions.
+  const heading = document.createElement("button");
+  heading.type = "button";
   heading.className = "shell-heading";
+  heading.title = "Switch session";
+  heading.setAttribute("aria-haspopup", "dialog");
   const title = createTextElement("span", "shell-title", sessionTitle(session));
   heading.append(title);
   if (session.cwdLabel) heading.append(createTextElement("span", "shell-cwd", session.cwdLabel));
@@ -2210,7 +2295,28 @@ function enterCollabClient(
   const triageBar = document.createElement("aside");
   triageBar.className = "triage-bar";
   triageBar.hidden = true;
-  shell.append(bar, container, triageBar);
+  const switcher = document.createElement("dialog");
+  switcher.className = "notification-sheet switch-sheet";
+  switcher.setAttribute("aria-label", "Switch session");
+  switcher.addEventListener("click", event => {
+    // A tap on the backdrop lands on the dialog itself, outside its box.
+    if (event.target !== switcher || !("clientX" in event)) return;
+    const pointer = event as MouseEvent;
+    const box = switcher.getBoundingClientRect();
+    if (
+      pointer.clientX < box.left ||
+      pointer.clientX > box.right ||
+      pointer.clientY < box.top ||
+      pointer.clientY > box.bottom
+    ) {
+      switcher.close();
+    }
+  });
+  heading.addEventListener("click", () => {
+    renderSessionSwitcher(shellState);
+    switcher.showModal();
+  });
+  shell.append(bar, container, triageBar, switcher);
   let triageSwipeStart: number | undefined;
   shell.addEventListener("pointerdown", event => {
     if (
@@ -2260,6 +2366,7 @@ function enterCollabClient(
     connectionChip: connection,
     triageBar,
     shell,
+    switcher,
     answerShown: false,
     answerTriageVisible: false,
     hasBeenLive: false,

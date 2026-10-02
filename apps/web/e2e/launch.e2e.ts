@@ -200,7 +200,7 @@ test("installed-PWA View and Control mount in the current window without losing 
     expect(shippedClient).not.toContain("M10 14h44v9H43v33h-9V23h-9v22h-9V23H10z");
     expect(await page.locator(".gateway-shell").evaluate(element =>
       [...element.children].map(child => child.id || child.className),
-    )).toEqual(["shell-bar", "root", "triage-bar"]);
+    )).toEqual(["shell-bar", "root", "triage-bar", "notification-sheet switch-sheet"]);
     const shellTargets = await page.locator(".shell-back, .shell-control").evaluateAll(elements =>
       elements.filter(element => !(element as HTMLElement).hidden).map(element => element.getBoundingClientRect().height),
     );
@@ -767,7 +767,8 @@ test("embedded active ask matches the original 3d shell interaction", async ({ p
     await page.unroute("**/api/v1/health");
     await page.evaluate(() => window.dispatchEvent(new Event("online")));
     await expect(page.locator(".conn-chip")).toHaveText("Relay unavailable", { timeout: 7_000 });
-    await page.locator(".shell-title").click();
+    // A neutral tap outside the feedback bar; the title itself now opens the session switcher.
+    await page.locator(".conn-chip").click();
     await expect(page.locator(".triage-bar")).toHaveAttribute("data-kind", "reconnecting");
     await expect(page.locator(".triage-copy")).toContainText("Relay unavailable — retrying");
     await page.evaluate(() => {

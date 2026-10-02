@@ -2057,6 +2057,56 @@ describe("fleet directory, sign-in, and remembered selection", () => {
     expect(harness.reloads.count).toBe(0);
   });
 
+  test("the session title opens a switcher of the other live sessions in directory order", async () => {
+    const current = fleetSession("c", "mac-studio", "live", { title: "Current build" });
+    const older = fleetSession("e", "mac-studio", "live", { title: "Older build", startedAt: "2026-07-21T08:00:00.000Z" });
+    const waiting = fleetSession("f", "mac-studio", "live", { title: "Waiting question", inputRequired: true });
+    const unreachable = fleetSession("b", "gapicore", "stale", { title: "Stale build", startedAt: "2026-07-21T09:00:00.000Z" });
+    const harness = await bootApp({
+      permission: "denied",
+      suffix: "session-switcher",
+      initialSessions: [older, current, unreachable, waiting],
+      initialHosts: [
+        { host: "mac-studio", status: "live", ageSeconds: 2 },
+        { host: "gapicore", status: "stale", ageSeconds: 600 },
+      ],
+      launchStatus: 200,
+    });
+    await openControl(harness, current);
+    const heading = harness.body.querySelector(".shell-heading");
+    expect(heading?.tagName).toBe("button");
+    expect(heading?.getAttribute("aria-haspopup")).toBe("dialog");
+    heading?.dispatchEvent(new Event("click"));
+
+    const sheet = harness.body.querySelector(".switch-sheet");
+    expect(sheet?.open).toBeTrue();
+    const rows = sheet?.querySelectorAll(".switch-row") ?? [];
+    expect(rows.map(row => row.dataset.instanceId)).toEqual([
+      waiting.instanceId,
+      unreachable.instanceId,
+      older.instanceId,
+    ]);
+    expect(sheet?.querySelectorAll(".queue-kicker").map(kicker => kicker.textContent)).toEqual([
+      "Needs you",
+      "Live sessions",
+    ]);
+    expect(rows.map(row => row.disabled)).toEqual([false, true, false]);
+    expect(rows[1]?.querySelector(".switch-detail")?.textContent).toBe("gapicore · project · Machine unreachable");
+    expect(rows[2]?.querySelector(".switch-detail")?.textContent).toBe("mac-studio · project");
+    expect(rows[2]?.getAttribute("aria-label")).toBe("Control Older build on mac-studio");
+
+    rows[1]?.dispatchEvent(new Event("click"));
+    expect(sheet?.open).toBeTrue();
+    const launchesBefore = harness.fetchPaths.filter(path => path.endsWith("/launch")).length;
+    rows[2]?.dispatchEvent(new Event("click"));
+    expect(sheet?.open).toBeFalse();
+    await settleUntil(() => harness.body.querySelector(".shell-title")?.textContent === "Older build", 100);
+    const launches = harness.fetchInits.filter(entry => entry.path.endsWith("/launch"));
+    expect(launches).toHaveLength(launchesBefore + 1);
+    expect(launches.at(-1)?.path).toBe(`/api/v1/sessions/${older.instanceId}/launch`);
+    expect(JSON.parse(String(launches.at(-1)?.init.body))).toEqual({ mode: "control", generation: 1 });
+  });
+
   test("an expired identity while a session is open keeps sign-in in that shell", async () => {
     const current = session("open-auth-expiry-001");
     const harness = await bootApp({

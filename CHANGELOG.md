@@ -26,6 +26,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
   notification's metadata-only data, proving tap handling rather than push delay or ordering.
   These scenarios qualify only after the next passed signed-candidate campaign.
 - Document granular tailnet/device posture guidance in the operations and security guides.
+- Switch sessions from inside an open session: tapping the title in the session bar opens a sheet
+  of the other live sessions in directory order (needs-you first, then live work), each with its
+  machine and working directory; unavailable rows stay visible but inert.
 
 ### Changed
 
