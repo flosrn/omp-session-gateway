@@ -53,7 +53,10 @@ proof is claimed for this variant.
   passed 23 (245 expectations, 14 s). On the settled runner source, the focused HarnessOS run
   passed 184 tests in 9 files (2,230 expectations, 37 s), including the runner's eight safety
   regressions (request deadlines, durable retired guards and the others), the 3 corrected Orca RPC
-  real-transport fixtures and the 16 activity-boundary tests. Before deployment, the gapicore service check reported 17 services ok and none
+  real-transport fixtures and the 16 activity-boundary tests. After the HarnessOS merge with
+  `main`, the root type check passed, the focused run passed 187 tests in 9 files (2,242
+  expectations, 40 s), and the hub web suite passed 95 tests in 9 files (637 expectations) with
+  its type check and build (the existing 1.08 MB chunk warning remains). Before deployment, the gapicore service check reported 17 services ok and none
   failing. A throwaway smoke of `FleetBridgeClient.workspace` against a real Bun HTTP server on a
   Unix socket: a write POST with the bearer got 200 and the exact request's receipt; a `text/html`
   reply and a JSON reply over 2 MiB were both rejected.
@@ -62,12 +65,13 @@ proof is claimed for this variant.
   id returned an identical receipt; `send` answered 200 at `input-accepted`, warning that delivery
   is unproven, and its same-id resend replayed; `set` answered 200 and the workspace then read
   `in-review`; `sleep` answered 200 sleeping; `close` answered 200 closed; `resume` answered 200
-  and its same-id resend returned an identical receipt. A turn starting on this runner is not yet
-  observed. After the `pi` fix, the Gateway transcript of an indexed `pi` root session answered
-  200 with 4 entries ending in `FINAL_SMOKE_OK`; `resume` of a `pi` root session in a new fixture
-  answered 200 `accepted` after Orca's root-lookup probe, and `resume` of an advisor session
-  answered `404 not-found`. A `send` to the resumed `pi` terminal answered 200 `input-accepted`; no
-  turn after a `pi` resume is observed yet.
+  and its same-id resend returned an identical receipt. After the `pi` fix, the Gateway
+  transcript of an indexed `pi` root session answered 200 with 4 entries ending in
+  `FINAL_SMOKE_OK`; `resume` of a `pi` root session in a new fixture answered 200 `accepted` after
+  Orca's root-lookup probe, and `resume` of an advisor session answered `404 not-found`. A `send`
+  to the resumed `pi` terminal answered 200 `input-accepted`, and the resumed root session's
+  Gateway transcript then answered 200 with 4 entries whose agent replies were
+  `ROOT_CREATE_FINAL_OK` and `ROOT_RESUME_FINAL_OK`: an agent turn ran after the resume.
 - Pre-deployment baseline on netcup-vie, for comparison after deployment: 5 services ok and 2
   inactive (`conversation-engine` and `cloudflared-conversation-engine`, both outside this change
   and left as they are); the Docker chat-engine stack ran 14 of 14 containers, ingress and webhook
@@ -106,10 +110,10 @@ proof is claimed for this variant.
   screenshot showed no horizontal overflow. In the built app in Chrome on loopback, with the
   session switcher open and focused, a streamed directory update left the first row the same
   element, still connected and still focused. The workspace panel opened as a real modal dialog
-  (`:modal`); its behaviour across a page swap and reopening is not yet proven.
+  (`:modal`); going back in history with it open swapped to the directory and closed it (neither
+  open nor modal), reopening it was modal again, and nothing overflowed at 390 px.
 
-**Not verified:** a turn starting after `resume`; turn start after `create` or `send` beyond this
-one fixture; `transcript` and
+**Not verified:** a turn after `create`, `send` or `resume` beyond these two fixtures; `transcript` and
 `resume` on a host whose index is off (they fall back to the exact agent and session id, and for
 `resume` to an `omp` session in a registered worktree; `history` there answers
 `409 unsupported` by design); the
