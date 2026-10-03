@@ -2195,6 +2195,8 @@ function restoreDirectory(historyValue?: unknown): Promise<boolean> {
   disposeActiveCollab?.();
   disposeActiveCollab = undefined;
   activeCollabShell = undefined;
+  // The client's global body rules lock scrolling; they belong only to the mounted transcript.
+  document.querySelector<HTMLLinkElement>("link[data-omp-collab-styles]")?.remove();
   closeWorkspacePanelForBodySwap();
   document.body.className = snapshot.bodyClass;
   document.body.replaceChildren(...snapshot.children);

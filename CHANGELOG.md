@@ -85,6 +85,8 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Restore session-list scrolling after leaving a transcript: remove the embedded client's global
+  stylesheet before restoring the directory, and reload it when another session opens.
 - Re-arm a Push phase after its one permitted foreign-notification overlap by waiting only for
   pending attention clears, then dismissing remaining owned notices. An activity-stop notice has
   no clear and previously held the re-arm until its 160-second timeout.

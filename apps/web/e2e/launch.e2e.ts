@@ -239,6 +239,11 @@ test("installed-PWA View and Control mount in the current window without losing 
         elements.map(element => (element as HTMLElement).dataset.instanceId),
       ),
     ).toEqual(directoryOrder);
+    // Restoring scrollY programmatically does not prove that wheel/touch scrolling is unlocked.
+    await page.mouse.move(190, 700);
+    await page.mouse.wheel(0, 300);
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(directoryScroll);
+    await page.evaluate(y => window.scrollTo(0, y), directoryScroll);
     const controlDirectoryScroll = await page.evaluate(() => window.scrollY);
 
     await page.locator(".queue-hero").getByRole("button", { name: "Open request" }).evaluate(
@@ -281,6 +286,9 @@ test("installed-PWA View and Control mount in the current window without losing 
     await expect(page.locator(".all-clear-title")).toHaveText("All clear");
     await expect(page.locator(".all-clear-copy")).toHaveText("Nothing needs you.");
     await expect(page.locator(".working-row")).toHaveCount(14);
+    await page.mouse.move(190, 700);
+    await page.mouse.wheel(0, 300);
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(controlDirectoryScroll);
     await expect(page.locator("#settings")).toBeVisible();
     const legacyAlertsBlock = await page.evaluate(() =>
       Boolean(document.querySelector(".home-alerts")),
