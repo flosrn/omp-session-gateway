@@ -1024,6 +1024,34 @@ and iPad enter the qualified matrix only from a passed campaign on the exact sig
 **Origin update:** The managed origin is now `omp.ofmchat.ai`; `omp.shipmate.bot` below records
 the original decision. The old DNS route was retired. See [public-origin evidence](COMPATIBILITY.md#private-flosrn-fork-evidence).
 
+**Planned origin — 2026-10-03:** Flo chose `https://omp.shipmate.bot` for a future return to
+his existing personal domain, without renaming OMP Sessions or migrating other services. A short
+interruption and fresh browser-local preferences are acceptable. This choice is accepted, not
+deployed: `omp.ofmchat.ai` remains the current origin. At the old `omp.shipmate.bot` hostname in
+the `shipmate.bot` zone, authenticated `POST /api/v1/workspace` previously received Cloudflare
+HTML 403 before reaching the Gateway; firewall events identified source/rule `l7ddos`. Revalidate
+those POSTs at the candidate origin and restore the current origin if they fail, rather than
+weakening zone-wide protection. See the [approved migration approach](plans/2026-10-03-return-to-omp-shipmate-bot.md).
+
+**Return attempt — 2026-10-03:** Execution was authorized, but candidate preparation failed
+before the origin switch. Chrome GET `/` returned Cloudflare HTML 403 (ray
+`a44ab95a2e884ba3-HKG`); gapicore HEAD `/` also returned 403 (ray `a44abc2b689d4e58-ARN`).
+Matching firewall events identify `source=ruleId=l7ddos`, metadata `dos-source=dosd-global`,
+and `originResponseStatus=0`. The zone's existing `sensitivity_level=eoff` override remains
+unchanged. Candidate DNS, ingress and Access destination were removed; the Gateway stays on
+`omp.ofmchat.ai` with the same audience, owner policy and source pin. No candidate authenticated
+POST or cutover was performed. The return requires a supported resolution of this Cloudflare
+block first; these events do not prove that every hostname in the zone is blocked.
+
+**Later cutover and rollback — 2026-10-03:** Without a protection change, the candidate eventually
+passed the authenticated JSON Origin-refusal preflight and real workspace reads and writes after
+the single-origin switch. Control, reload and Back also worked. The final disposable close returned
+Cloudflare HTML 504 rather than a broker receipt; its cause is undetermined and the write was not
+retried. The agreed gate therefore required rollback. The managed origin and portal routing are
+again `omp.ofmchat.ai`; the candidate route and fixture were removed. Audience, owner policy,
+tunnel, Gateway source and protection settings are unchanged. This does not establish that the
+earlier mitigation was repaired. See [tested evidence](COMPATIBILITY.md#private-flosrn-fork-evidence).
+
 **Decision:** Keep the upstream Serve path fail-closed and add an explicit `cloudflare-access`
 authenticator for the loopback origin at `omp.shipmate.bot`. Verify RS256 application assertions
 against the pinned HTTPS team issuer/JWKS origin and audience, then apply the exact human email

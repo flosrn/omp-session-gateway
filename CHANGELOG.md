@@ -67,6 +67,9 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ### Changed
 
+- Record the private fleet portal's attempted return to `omp.shipmate.bot` and verified rollback
+  after an unreadable public close response. The working origin remains `omp.ofmchat.ai`;
+  no application protocol, Access audience or Cloudflare protection setting changed.
 - Raise an activity-stop notification when a turn ends after a mid-turn question is answered:
   the registry now carries an observed working turn across the ask.
 - On authorization loss (401, 403 or an Access login redirect from the directory, a workspace

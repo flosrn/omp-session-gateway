@@ -128,6 +128,46 @@ historical, not an outstanding deployment target.
 Both disposable worktrees, their terminals, the fixture's Orca setup/repository registration and
 temporary directory were removed; subsequent listings contained no matching fixture.
 
+**Tested — candidate-origin preflight failed, 2026-10-03:** Preparing `omp.shipmate.bot` on the
+same dedicated tunnel and Access application did not make it usable. Chrome GET `/` received
+Cloudflare HTML 403, ray `a44ab95a2e884ba3-HKG`; gapicore HEAD `/` received 403, ray
+`a44abc2b689d4e58-ARN`. Matching firewall events report `source=ruleId=l7ddos`, metadata
+`dos-source=dosd-global` and `originResponseStatus=0`. The existing zone DDoS override already
+uses `sensitivity_level=eoff`; no protection setting was changed. Candidate DNS, ingress and
+Access destination were removed without changing the working route. The managed Gateway probe
+returned `c791402559b8a965d1734eea2c83677380377af8`, its configured origin remained
+`https://omp.ofmchat.ai`, and an authenticated browser sessions GET there returned JSON 200.
+Candidate Access login, authenticated workspace POST, Control, PWA and Push were not exercised.
+This initial attempt was blocked before deployment; the later attempt and rollback are recorded below.
+
+**Tested — candidate cutover rolled back, 2026-10-03:** A later authenticated candidate-origin
+preflight reached the Gateway's JSON 403 Origin refusal for all three hosts, without changing
+Cloudflare protection. HarnessOS `3ff8eb8` applied only `omp-session-gateway-service`; the Gateway
+source remained `c791402559b8a965d1734eea2c83677380377af8`. Candidate inventories for Mac,
+gapicore and netcup-vie returned JSON 200. A disposable Mac workspace exercised create, set, send,
+history, search, saved transcript, sleep, close, resume and a post-resume send with 200 receipts.
+Saved assistant replies contained `SHIPMATE_CREATE_OK`, `SHIPMATE_SEND_OK` and
+`SHIPMATE_RESUME_OK`. Replaying the identical send id returned the identical receipt, with one
+saved user prompt. Old/foreign Origin requests returned 403; a stale-generation launch returned 409.
+Control mounted the pinned same-origin client and reconnected after reload. Back cleared the
+selection, removed its stylesheet and restored visible overflow; programmatic scrolling moved
+0 to 350, and the 390px viewport had no horizontal overflow. Relay wheel/screenshot calls failed
+against the hidden browser tab; this is not pointer-scroll or visual capture evidence. SSE delivered
+snapshot, upsert and keepalive events. APIs remained no-store, the service worker cached only four
+immutable assets, and capability checks found none in DOM, storage or URLs.
+
+The final resumed-workspace close returned **Cloudflare HTML 504**, not a broker receipt. Its
+outcome remained unknown and the write was not retried; public read-only inventory and Orca's local
+terminal listing subsequently showed no fixture terminal. The 504 cause is undetermined, not
+established as the earlier `dosd-global` block or as hostname-specific. The cutover gate failed.
+Rollback restored `https://omp.ofmchat.ai`, the previous delivered engine, readiness at the same
+Gateway source, and owner-only Access/DNS/ingress. Restored inventories returned JSON 200 on all
+three hosts; anonymous sessions redirected to Access (302). The candidate CNAME, ingress and
+Access destination were removed. The dedicated connector kept its PID and activation timestamp.
+The disposable worktree, terminals, Orca setup/repository registration and temporary repo were
+removed. Chrome Push was off at both origins; physical-device installation, Push and revocation
+were not tested. This is a rolled-back attempt, not a successful migration or qualification.
+
 **Not verified:** `transcript` and `resume` with the host's index actually disabled; Access
 revocation on a real device; app badge and end-of-turn Push on iPhone; Hako and direct-network
 qualification. Public browser checks used Chrome through the configured proxy, not a physical
