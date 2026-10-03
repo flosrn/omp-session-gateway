@@ -50,7 +50,7 @@ no QR scans, copied links, or per-session setup.
 
 ## Private flosrn fleet fork
 
-This fork adds a managed fleet directory at `https://omp.shipmate.bot`, behind Cloudflare
+This fork adds a managed fleet directory at `https://omp.ofmchat.ai`, behind Cloudflare
 Access, for the Mac and HarnessOS compute hosts. Tap **Control** to open the same-origin pinned
 OMP client. Stale and empty hosts remain visible; unavailable sessions cannot launch.
 The upstream release links and qualification tables below describe upstream artifacts, not this

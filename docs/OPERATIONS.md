@@ -194,7 +194,7 @@ identities, unsafe paths, unknown fields, and invalid poll/TTL combinations.
 
 Use this fork's `cloudflare-access` mode only for the managed fleet variant. Never route the
 Cloudflare Tunnel into `tailscale-serve`; all Serve rules below remain unchanged for that mode.
-The listener remains `127.0.0.1`, with `http.publicOrigin = "https://omp.shipmate.bot"`.
+The listener remains `127.0.0.1`, with `http.publicOrigin = "https://omp.ofmchat.ai"`.
 
 | Field | Requirement |
 |---|---|

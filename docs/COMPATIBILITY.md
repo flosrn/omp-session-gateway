@@ -4,7 +4,7 @@
 
 The Cloudflare Access/HarnessOS fleet variant in this fork is separate from the upstream release
 matrix below. Upstream Tailscale and physical-device qualification does not qualify this variant.
-The intended always-on host is gapicore and origin is `https://omp.shipmate.bot`; a declared unit,
+The intended always-on host is gapicore and origin is `https://omp.ofmchat.ai`; a declared unit,
 tunnel, source pin or secret render is not proof of deployment readiness.
 
 **Tested — local Chrome mobile-viewport smoke:** the directory showed 10 live Mac sessions,
@@ -113,14 +113,25 @@ proof is claimed for this variant.
   (`:modal`); going back in history with it open swapped to the directory and closed it (neither
   open nor modal), reopening it was modal again, and nothing overflowed at 390 px.
 
-**Not verified:** a turn after `create`, `send` or `resume` beyond these two fixtures; `transcript` and
-`resume` on a host whose index is off (they fall back to the exact agent and session id, and for
-`resume` to an `omp` session in a registered worktree; `history` there answers
-`409 unsupported` by design); the
-candidate at the public `https://omp.shipmate.bot` origin (the retained Chrome now reaches it
-signed in, titled OMP Sessions, but it still serves the previous production pin); Access
-revocation on a real device; app badge and end-of-turn Push on iPhone; and the deployed
-HarnessOS/Gateway pair. Nothing here is Supported or Qualified.
+**Tested — deployed public origin, 2026-10-03:** Gateway `a729c9b` and HarnessOS `cd57919`
+served `https://omp.ofmchat.ai` through the existing owner-only Access app and dedicated tunnel.
+The anonymous directory and workspace POST redirected to Access (302); authenticated inventories
+for Mac, gapicore and netcup-vie returned 200. A disposable mobile-viewport Mac workspace used the
+model picker to create an OMP terminal, then exercised metadata editing, send, sleep, saved history
+and transcript, resume and close through the public broker, all with 200 receipts. DeepSeek's
+token-plan quota refused its turns (429); a separate Grok fixture returned the actual assistant
+markers for create, send and a post-resume prompt. Control joined the pinned client and reconnected
+after reload. Mobile 390x844 and desktop 1365x768 showed no horizontal overflow; the persisted
+selection contained only version, instanceId, generation and mode, and Back cleared it.
+The old `omp.shipmate.bot` DNS route was removed; the earlier old-origin observations remain
+historical, not an outstanding deployment target.
+Both disposable worktrees, their terminals, the fixture's Orca setup/repository registration and
+temporary directory were removed; subsequent listings contained no matching fixture.
+
+**Not verified:** `transcript` and `resume` with the host's index actually disabled; Access
+revocation on a real device; app badge and end-of-turn Push on iPhone; Hako and direct-network
+qualification. Public browser checks used Chrome through the configured proxy, not a physical
+iPhone. Nothing here is Supported or Qualified.
 
 ## Platforms and browsers
 

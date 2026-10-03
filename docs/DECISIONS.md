@@ -1021,6 +1021,9 @@ and iPad enter the qualified matrix only from a passed campaign on the exact sig
 
 **Status:** Accepted for this private fork; deployment qualification pending
 
+**Origin update:** The managed origin is now `omp.ofmchat.ai`; `omp.shipmate.bot` below records
+the original decision. The old DNS route was retired. See [public-origin evidence](COMPATIBILITY.md#private-flosrn-fork-evidence).
+
 **Decision:** Keep the upstream Serve path fail-closed and add an explicit `cloudflare-access`
 authenticator for the loopback origin at `omp.shipmate.bot`. Verify RS256 application assertions
 against the pinned HTTPS team issuer/JWKS origin and audience, then apply the exact human email
