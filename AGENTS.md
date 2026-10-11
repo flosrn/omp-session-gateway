@@ -177,5 +177,5 @@ The supported settings contract is:
 
 ## Domain docs
 
-Read `CONTEXT.md` when product names or path terminology are ambiguous. For the planned domain
+Read `GLOSSARY.md` when product names or path terminology are ambiguous. For the planned domain
 return, read `docs/plans/2026-10-03-return-to-omp-shipmate-bot.md` before changing routing.
